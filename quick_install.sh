@@ -26,6 +26,12 @@ git -C third_party/asimov-1 checkout --quiet "$(git rev-parse HEAD:third_party/a
 git submodule absorbgitdirs third_party/asimov-1
 git submodule init third_party/asimov-1
 
+# The Isaac Sim wheels from pypi.nvidia.com are large; uv's defaults (30 s
+# timeout, 50 parallel downloads) cause timeouts on slower connections.
+# Override either by setting it in the environment before running this script.
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-300}"
+export UV_CONCURRENT_DOWNLOADS="${UV_CONCURRENT_DOWNLOADS:-4}"
+
 uv venv --seed --python 3.11
 source .venv/bin/activate
 
