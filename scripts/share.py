@@ -1,8 +1,9 @@
 """Upload a completed training run to the Hugging Face Hub.
 
 Uploads ``params/agent.yaml``, ``params/env.yaml`` and ``exported/policy.onnx`` from a run directory,
-together with a generated model card. If the run has no ONNX export yet, the latest checkpoint is exported
-first via ``play.py --export-only``. Requires a prior ``hf auth login`` (or ``HF_TOKEN``).
+together with a generated model card, and for motion tracking runs the reference motion the policy follows. If the
+run has no ONNX export yet, the latest checkpoint is exported first via ``play.py --export-only``. Requires a prior
+``hf auth login`` (or ``HF_TOKEN``).
 
 File paths from the training machine are reduced to file names in the uploaded yaml files; the run directory
 itself is not changed.
@@ -14,7 +15,10 @@ import re
 import subprocess
 import sys
 
-from cyclotron.hub import strip_local_paths
+import numpy as np
+
+from cyclotron.hub import link_text, strip_local_paths, tracking_model_card
+from cyclotron.sim2sim import TrackingRun, load_env_yaml
 
 README_TEMPLATE = """---
 library_name: asimov
@@ -29,19 +33,24 @@ license: bsd-3-clause
 - `policy.onnx` is the exported policy for inference, producing joint-position actions.
 - `agent.yaml` records the actor-critic and AMP training settings, including the motion data configuration.
 - `env.yaml` records the simulation and locomotion task settings, including observations, actions, commands, and rewards.
-- Training and evaluation code: [menloresearch/cyclotron](https://github.com/menloresearch/cyclotron).
+- Training and evaluation code: [{code_name}]({code_url}).
 """
 
+DEFAULT_CODE_URL = "https://github.com/menloresearch/cyclotron"
 DEFAULT_TITLE = "Asimov 1 locomotion policy checkpoint"
 DEFAULT_SUMMARY = (
     "Basic velocity-commanded locomotion policy for Asimov 1, trained in Isaac Lab with PPO and adversarial motion"
     " priors (AMP)."
+)
+DEFAULT_TRACKING_SUMMARY = (
+    "Motion tracking policy for Asimov 1, trained in Isaac Lab with PPO to follow a retargeted human motion."
 )
 
 # Training task for each experiment name, used when exporting a run that has no policy.onnx yet.
 EXPERIMENT_TASKS = {
     "asimov1_velocity": "Asimov1-Velocity-v0",
     "asimov_velocity_amp": "Asimov1-Velocity-AMP-v0",
+    "asimov1_tracking": "Asimov1-Tracking-Play-v0",
 }
 
 PLAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rsl_rl", "play.py")
@@ -49,12 +58,22 @@ PLAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rsl_rl",
 parser = argparse.ArgumentParser(description="Upload a trained Cyclotron run to the Hugging Face Hub.")
 parser.add_argument("run_dir", type=str, help="Run directory, e.g. logs/rsl_rl/<experiment_name>/<run>.")
 parser.add_argument("--repo-id", "--repo_id", dest="repo_id", required=True, help="Target repo, e.g. user/name.")
-parser.add_argument("--title", type=str, default=DEFAULT_TITLE, help="Title of the model card.")
+parser.add_argument("--title", type=str, default=None, help="Title of the model card.")
 parser.add_argument(
     "--summary",
     type=str,
-    default=DEFAULT_SUMMARY,
-    help="Paragraph shown under the model card title, e.g. describing the training method.",
+    default=None,
+    help="Paragraph shown under the model card title, e.g. describing the training method or results.",
+)
+parser.add_argument(
+    "--code-url", "--code_url", dest="code_url", default=DEFAULT_CODE_URL, help="Training code linked from the card."
+)
+parser.add_argument(
+    "--motion-source",
+    "--motion_source",
+    dest="motion_source",
+    default=None,
+    help="Motion tracking runs: where the reference motion comes from, with any credit its licence asks for.",
 )
 parser.add_argument(
     "--onnx",
@@ -139,7 +158,35 @@ def main() -> None:
         # play.py exports next to the checkpoint, so upload from there.
         files["policy.onnx"] = os.path.join(os.path.dirname(checkpoint), "exported", "policy.onnx")
 
-    readme = README_TEMPLATE.format(title=args_cli.title, summary=args_cli.summary)
+    env_cfg = load_env_yaml(files["env.yaml"])
+    motion_cfg = (env_cfg.get("commands") or {}).get("motion")
+    if isinstance(motion_cfg, dict) and motion_cfg.get("motion_file"):
+        # A tracking policy reads its reference motion at run time, so the motion goes with it, under the file name
+        # the shared env.yaml refers to.
+        run = TrackingRun.load(run_dir)
+        if not os.path.isfile(run.motion_file):
+            sys.exit(f"[ERROR] The run's reference motion is missing: {run.motion_file}")
+        motion_name = os.path.basename(run.motion_file)
+        files[motion_name] = run.motion_file
+        fps = 1.0 / (run.physics_dt * run.decimation)
+        readme = tracking_model_card(
+            title=args_cli.title or f"Asimov 1 motion tracking policy: {os.path.splitext(motion_name)[0]}",
+            summary=args_cli.summary or DEFAULT_TRACKING_SUMMARY,
+            motion=motion_name,
+            duration=len(np.load(run.motion_file)["joint_pos"]) / fps,
+            fps=fps,
+            action_scale=run.action_scale,
+            code_url=args_cli.code_url,
+            checkpoint=os.path.basename(checkpoint) if needs_export else None,
+            motion_source=args_cli.motion_source,
+        )
+    else:
+        readme = README_TEMPLATE.format(
+            title=args_cli.title or DEFAULT_TITLE,
+            summary=args_cli.summary or DEFAULT_SUMMARY,
+            code_url=args_cli.code_url,
+            code_name=link_text(args_cli.code_url),
+        )
 
     # Upload copies of the yaml files without the training machine's file paths; the run directory is left as is.
     yamls = {}

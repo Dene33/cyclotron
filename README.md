@@ -230,7 +230,11 @@ latest checkpoint is exported automatically; use `--checkpoint` to share a
 different one (a full path, or a filename inside the run directory). Use `--title "<text>"` to set the card's title,
 `--summary "<text>"` to add a paragraph describing your training method,
 `--private` to create a private repo, and `--dry-run` to preview the card
-without uploading.
+without uploading. `--code-url <url>` changes the training code the card links to.
+
+A motion tracking policy reads its reference motion at run time, so for a tracking run the motion file is uploaded
+too, and the card explains how to feed the policy the motion. Credit the motion's source with
+`--motion-source "<text>"`, and check the policy with `--evaluate` and `--sim2sim` first.
 
 ## View a shared policy
 

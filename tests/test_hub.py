@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cyclotron.hub import strip_local_paths
+from cyclotron.hub import link_text, strip_local_paths, tracking_model_card
 
 # Trimmed copy of a real shared env.yaml: Isaac Lab tags, training-machine paths and internal module names.
 ENV_YAML = """\
@@ -128,3 +128,37 @@ def test_strip_local_paths_keeps_policy_settings():
             "      asset_path: asimov_1.urdf",
         )
     ]
+
+
+def test_tracking_model_card_says_how_to_run_the_policy():
+    card = tracking_model_card(
+        title="Forward jump",
+        summary="A jump.",
+        motion="jump.npz",
+        duration=2.74,
+        fps=50.0,
+        action_scale=0.25,
+        code_url="https://github.com/someone/cyclotron/tree/motion-tracking",
+        checkpoint="model_3300.pt",
+        motion_source="CMU 13_11.",
+    )
+
+    assert card.startswith("---\nlibrary_name: asimov\n")
+    assert "# Forward jump\n\nA jump.\n" in card
+    assert "`jump.npz`: the reference motion at 50 Hz, 2.74 s long" in card
+    assert "every 20 ms" in card and "default pose + 0.25 x action" in card
+    assert "Checkpoint `model_3300.pt`." in card
+    assert "## Reference motion\n\nCMU 13_11.\n" in card
+    assert "[someone/cyclotron/tree/motion-tracking](https://github.com/someone/cyclotron/tree/motion-tracking)" in card
+    assert "{" not in card
+
+
+def test_tracking_model_card_leaves_out_what_is_not_known():
+    card = tracking_model_card("T", "S", "m.npz", 1.0, 50.0, 0.25, "https://github.com/menloresearch/cyclotron")
+    assert "Checkpoint" not in card
+    assert "## Reference motion" not in card
+
+
+def test_link_text_drops_the_scheme_and_github_host():
+    assert link_text("https://github.com/menloresearch/cyclotron") == "menloresearch/cyclotron"
+    assert link_text("https://example.org/models/") == "example.org/models"

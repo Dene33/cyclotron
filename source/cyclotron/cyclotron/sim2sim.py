@@ -37,6 +37,12 @@ _EnvYamlLoader.add_constructor(
 _EnvYamlLoader.add_multi_constructor("tag:yaml.org,2002:python/", lambda loader, suffix, node: f"<{suffix}>")
 
 
+def load_env_yaml(path: str | Path) -> dict:
+    """A run's ``params/env.yaml``, read safely: Python tuples as tuples, other Python objects as placeholders."""
+    with open(path) as f:
+        return yaml.load(f, Loader=_EnvYamlLoader)
+
+
 def per_joint(values: dict[str, float], joint_names: list[str]) -> np.ndarray:
     """Resolve an Isaac Lab ``{joint name regex: value}`` dict over ``joint_names``."""
     out = np.full(len(joint_names), np.nan)
@@ -67,8 +73,7 @@ class TrackingRun:
 
     @classmethod
     def load(cls, run_dir: str | Path) -> TrackingRun:
-        with open(Path(run_dir) / "params" / "env.yaml") as f:
-            cfg = yaml.load(f, Loader=_EnvYamlLoader)
+        cfg = load_env_yaml(Path(run_dir) / "params" / "env.yaml")
         policy = [name for name, term in cfg["observations"]["policy"].items() if isinstance(term, dict)]
         if policy != POLICY_OBSERVATIONS:
             raise ValueError(f"Expected the Asimov1-Tracking policy observations {POLICY_OBSERVATIONS}, got {policy}.")
