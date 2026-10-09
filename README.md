@@ -105,6 +105,64 @@ Without it, the latest checkpoint is used.
 
 Checkpoints and logs are written to `logs/rsl_rl/<experiment_name>/<run>/`.
 
+## Track a reference motion
+
+To teach Asimov 1 one specific motion, such as a jump, train a policy that follows a recorded motion frame by frame
+(motion tracking, as in [BeyondMimic](https://github.com/HybridRobotics/whole_body_tracking)).
+
+1. **Retarget** the human motion to Asimov 1 with [SOMA Retargeter](https://github.com/NVIDIA/soma-retargeter)
+   (target `asimov_1`). Asimov 1 support and the BVH converter below are on the `add-asimov-1` branch of
+   [Dene33/soma-retargeter](https://github.com/Dene33/soma-retargeter/tree/add-asimov-1) for now. The BVH must use
+   the SOMA skeleton; motions from the
+   [CMU Motion Capture Database](http://mocap.cs.cmu.edu/) (MotionBuilder-friendly BVH conversion) can be moved onto
+   it with the retargeter's `app/tools/bvh_to_soma.py`. The result is a CSV of root poses and joint angles. CMU
+   `13_11` (forward jump) makes a good first test:
+
+   ```bash
+   # in the soma-retargeter repository
+   uv run python app/tools/bvh_to_soma.py --input 13_11.bvh --output output/soma/13_11.bvh
+   # then retarget output/soma/ to asimov_1, e.g. with batch retargeting
+   ```
+
+2. **Convert** the CSV into a motion file:
+
+   ```bash
+   ./cyclotron.sh --csv-to-npz --input_file 13_11.csv --input_fps 120 --output_file motions/forward_jump.npz
+   ```
+
+   The CSV does not record its frame rate, so pass the BVH's as `--input_fps` (1 / `Frame Time`, 120 for SOMA BVH
+   files). The motion is resampled to the 50 Hz policy rate and replayed on the training robot to get the pose and
+   velocity of every body. It is moved to start above the origin, and lifted wherever its feet sink into the ground
+   (`--keep_xy` and `--keep_z` turn this off). `--frame_range START END` keeps part of the CSV. The script then
+   reports the flight time and every joint that leaves its position or velocity limits. Asimov 1 cannot follow those
+   parts exactly; the policy will learn the closest motion it can. Motion files (`*.npz`) are not tracked by git.
+
+3. **Train**:
+
+   ```bash
+   ./cyclotron.sh --train --task Asimov1-Tracking-v0 --motion_file motions/forward_jump.npz \
+       --num_envs 4096 --headless
+   ```
+
+   Runs are written to `logs/rsl_rl/asimov1_tracking/<date>_tracking_<motion>/`. In TensorBoard, the
+   `Metrics/motion/error_*` tracking errors should fall and `Episode_Termination/*` (early endings when the robot
+   drifts from the reference) should become rare. `--resume --load_run <run>` reuses the run's motion.
+
+4. **Play**:
+
+   ```bash
+   ./cyclotron.sh --play --task Asimov1-Tracking-Play-v0 --num_envs 4
+   ```
+
+   Every robot starts on the motion's first frame and the motion repeats. The policy plays the motion it was trained
+   on unless `--motion_file` is given. Add `--headless --video --video_length 300` to record a video instead of
+   opening a window.
+
+The policy only observes what the robot measures: the reference joint positions and velocities at the current frame,
+the pelvis IMU orientation relative to the reference pelvis and its angular velocity, joint positions and velocities,
+and its previous action. To run it on the robot, the controller steps through the motion file at 50 Hz alongside the
+policy. `--share` and `--view` currently support the velocity policies only.
+
 ## Share your policy
 
 Share a finished run on the Hugging Face Hub. Log in first with

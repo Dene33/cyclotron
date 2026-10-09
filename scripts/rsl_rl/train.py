@@ -139,6 +139,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
+
+    # Passing --checkpoint implies --resume.
+    agent_cfg.resume = agent_cfg.resume or args_cli.checkpoint is not None
+    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+        resume_path = cli_args.resolve_checkpoint(log_root_path, agent_cfg, args_cli)
+
+    # Motion tracking tasks: the reference motion, from --motion_file or else the resumed run.
+    motion_file = cli_args.apply_motion_file(
+        env_cfg, args_cli, run_dir=os.path.dirname(resume_path) if agent_cfg.resume else None
+    )
+    if motion_file is not None and args_cli.run_name is None:
+        agent_cfg.run_name = f"{agent_cfg.run_name}_{os.path.splitext(os.path.basename(motion_file))[0]}"
+
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     print(f"Exact experiment name requested from command line: {log_dir}")
     if agent_cfg.run_name:
@@ -158,11 +171,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
-
-    # Passing --checkpoint implies --resume.
-    agent_cfg.resume = agent_cfg.resume or args_cli.checkpoint is not None
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = cli_args.resolve_checkpoint(log_root_path, agent_cfg, args_cli)
 
     if args_cli.video:
         video_kwargs = {

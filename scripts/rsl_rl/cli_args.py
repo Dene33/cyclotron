@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,6 +31,12 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     )
     arg_group.add_argument(
         "--logger", type=str, default=None, choices={"wandb", "tensorboard", "neptune"}, help="Logger module to use."
+    )
+    arg_group.add_argument(
+        "--motion_file",
+        type=str,
+        default=None,
+        help="Reference motion (.npz) for motion tracking tasks, made with ./cyclotron.sh --csv-to-npz.",
     )
     arg_group.add_argument(
         "--log_project_name", type=str, default=None, help="Name of the logging project when using wandb or neptune."
@@ -65,6 +72,42 @@ def resolve_checkpoint(log_root_path: str, agent_cfg: RslRlBaseRunnerCfg, args_c
             " to pick it from that run folder."
         )
     return get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+
+
+_MOTION_FILE_LINE = re.compile(r"^\s*motion_file:\s*['\"]?(.*?)['\"]?\s*$", re.MULTILINE)
+
+
+def apply_motion_file(env_cfg, args_cli: argparse.Namespace, run_dir: str | None = None) -> str | None:
+    """Set the reference motion of a motion tracking task from ``--motion_file`` and return its path.
+
+    Without ``--motion_file``, the motion recorded in ``run_dir/params/env.yaml`` is used, so a trained policy plays
+    the motion it was trained on. Tasks without a reference motion are left alone, but reject ``--motion_file``.
+    """
+    motion_cfg = getattr(getattr(env_cfg, "commands", None), "motion", None)
+    if motion_cfg is None or not hasattr(motion_cfg, "motion_file"):
+        if args_cli.motion_file is not None:
+            raise ValueError("--motion_file only applies to motion tracking tasks such as Asimov1-Tracking-v0.")
+        return None
+
+    motion_file = args_cli.motion_file
+    if motion_file is None and run_dir is not None:
+        env_yaml = os.path.join(run_dir, "params", "env.yaml")
+        if os.path.isfile(env_yaml):
+            with open(env_yaml, encoding="utf-8") as f:
+                match = _MOTION_FILE_LINE.search(f.read())
+            if match and match.group(1):
+                motion_file = match.group(1)
+                print(f"[INFO] Using the motion this policy was trained on: {motion_file}")
+    if motion_file is None:
+        raise ValueError(
+            "This task follows a reference motion. Pass --motion_file <motion.npz>; make one from a retargeted CSV"
+            " with ./cyclotron.sh --csv-to-npz."
+        )
+    motion_file = os.path.abspath(os.path.expanduser(motion_file))
+    if not os.path.isfile(motion_file):
+        raise FileNotFoundError(f"Motion file not found: {motion_file}")
+    motion_cfg.motion_file = motion_file
+    return motion_file
 
 
 def update_rsl_rl_cfg(agent_cfg: RslRlBaseRunnerCfg, args_cli: argparse.Namespace):

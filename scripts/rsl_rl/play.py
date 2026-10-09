@@ -135,6 +135,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     log_dir = os.path.dirname(resume_path)
 
+    # Motion tracking tasks: the reference motion, from --motion_file or else the one the policy was trained on.
+    cli_args.apply_motion_file(env_cfg, args_cli, run_dir=log_dir)
+
     env_cfg.log_dir = log_dir
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
