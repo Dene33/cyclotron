@@ -11,6 +11,9 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import DelayedPDActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
+from cyclotron.assets.actuators import DelayedDCMotorCfg
+from cyclotron.assets.asimov_1_specs import ASIMOV_1_MAX_SPEED, ASIMOV_1_PEAK_TORQUE
+
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 ASIMOV_1_MODEL_DIR = str(_REPOSITORY_ROOT / "third_party" / "asimov-1" / "sim-model")
 ASIMOV_1_URDF_PATH = str(
@@ -219,3 +222,19 @@ ASIMOV_1_DELAYED_CFG = ArticulationCfg(
     soft_joint_pos_limit_factor=0.9,
     actuators=ASIMOV_1_ACTUATORS,
 )
+
+
+def asimov_1_dc_motor_actuators(no_load_speed_ratio: float = 1.0) -> dict[str, DelayedDCMotorCfg]:
+    """``ASIMOV_1_ACTUATORS`` with torque falling with speed, as in a DC motor: from the peak torque at standstill to
+    zero at ``no_load_speed_ratio`` times the maximum speed, still capped at each group's effort limit.
+
+    The no-load speed is not published, but it is at least the maximum speed, so a ratio of 1 is the weakest motor.
+    """
+    return {
+        name: DelayedDCMotorCfg(
+            **{key: value for key, value in actuator.to_dict().items() if key != "class_type"},
+            saturation_effort=ASIMOV_1_PEAK_TORQUE[name],
+            no_load_speed=ASIMOV_1_MAX_SPEED[name] * no_load_speed_ratio,
+        )
+        for name, actuator in ASIMOV_1_ACTUATORS.items()
+    }
