@@ -181,6 +181,24 @@ The reference stands furthest back on the left, the rollouts follow in the order
 `--title` and `--caption` add a line of text at the top and bottom, and `--preview <seconds>` renders a single frame
 to a PNG instead of the video. Without `--motion` only the rollouts are drawn.
 
+## Check a tracking policy
+
+Before trusting a tracking policy outside training, check how reliably it plays its motion.
+
+**Many randomised robots in Isaac Sim.** `--evaluate` starts 1024 robots on the reference's first frame and plays the
+motion to its end:
+
+```bash
+./cyclotron.sh --evaluate --load_run <run> --checkpoint model_3300.pt --condition pushes
+```
+
+It reports how many fall (any of the training terminations before the end) and when, how high and far the others
+get, and the peaks of their joint speed, motor torque and foot force. `--condition nominal` turns off randomisation
+and sensor noise, `randomized` (the default) keeps the training randomisation without pushes, and `pushes` adds the
+pushes. `--motor_speed_ratio <r>` makes motor torque fall with speed, from each actuator's peak torque at standstill to
+zero at `r` times its maximum speed. Asimov 1's no-load speeds are not published but are at least the maximum speeds,
+so `1` is the weakest motor.
+
 ## Share your policy
 
 Share a finished run on the Hugging Face Hub. Log in first with

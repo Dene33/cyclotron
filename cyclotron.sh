@@ -6,7 +6,7 @@ CYCLOTRON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PYTHON_EXE="${PYTHON_EXE:-python}"
 
 usage() {
-    echo "Usage: $0 {--install|--list|--csv-to-npz|--train|--play|--render|--share|--view} [arguments]"
+    echo "Usage: $0 {--install|--list|--csv-to-npz|--train|--play|--evaluate|--render|--share|--view} [arguments]"
 }
 
 case "${1:-}" in
@@ -28,6 +28,10 @@ case "${1:-}" in
     -p|--play)
         shift
         "${PYTHON_EXE}" "${CYCLOTRON_ROOT}/scripts/rsl_rl/play.py" "$@"
+        ;;
+    -e|--evaluate)
+        shift
+        "${PYTHON_EXE}" "${CYCLOTRON_ROOT}/scripts/rsl_rl/evaluate.py" "$@"
         ;;
     -r|--render)
         shift
