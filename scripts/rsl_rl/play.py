@@ -57,6 +57,18 @@ parser.add_argument(
     action="store_true",
     help="Exit after exporting the policy instead of running the simulation loop.",
 )
+parser.add_argument(
+    "--record",
+    type=str,
+    default=None,
+    help="Record the first robot's root pose and joint positions to this .npz, for ./cyclotron.sh --render, then exit.",
+)
+parser.add_argument(
+    "--record_steps",
+    type=int,
+    default=None,
+    help="Steps to record. Default: one pass of the reference motion for motion tracking tasks, else one episode.",
+)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -82,6 +94,7 @@ import os
 import time
 
 import gymnasium as gym
+import numpy as np
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -107,6 +120,41 @@ from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_che
 import isaaclab_tasks  # noqa: F401
 import cyclotron.tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
+
+
+class RolloutRecorder:
+    """Records the first robot's root pose and joint positions, for ./cyclotron.sh --render."""
+
+    def __init__(self, env, steps: int | None):
+        self.robot = env.scene["robot"]
+        self.origin = env.scene.env_origins[0]
+        commands = env.command_manager.active_terms
+        self.motion = env.command_manager.get_term("motion") if "motion" in commands else None
+        if steps is None:
+            steps = self.motion.motion.num_frames - 1 if self.motion is not None else int(env.max_episode_length)
+        self.steps = steps
+        self.fps = 1.0 / env.step_dt
+        self.data = {"frame": [], "root_pos": [], "root_quat": [], "joint_pos": []}
+
+    @property
+    def done(self) -> bool:
+        return len(self.data["frame"]) > self.steps
+
+    def log(self) -> None:
+        # For motion tracking tasks, the reference frame the robot is following; otherwise the step.
+        frame = self.motion.time_steps[0].item() if self.motion is not None else len(self.data["frame"])
+        self.data["frame"].append(frame)
+        # Copies: on a CPU device .cpu().numpy() shares memory with simulation buffers that are updated in place.
+        self.data["root_pos"].append((self.robot.data.root_link_pos_w[0] - self.origin).cpu().numpy().copy())
+        self.data["root_quat"].append(self.robot.data.root_link_quat_w[0].cpu().numpy().copy())
+        self.data["joint_pos"].append(self.robot.data.joint_pos[0].cpu().numpy().copy())
+
+    def save(self, path: str) -> None:
+        path = os.path.abspath(os.path.expanduser(path))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {key: np.array(values) for key, values in self.data.items()}
+        np.savez(path, fps=np.array(self.fps), joint_names=np.array(self.robot.joint_names), **data)
+        print(f"[INFO] Recorded {len(self.data['frame'])} frames to {path}")
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -209,8 +257,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dt = env.unwrapped.step_dt
 
+    recorder = RolloutRecorder(env.unwrapped, args_cli.record_steps) if args_cli.record else None
     obs = env.get_observations()
     timestep = 0
+    if recorder is not None:
+        recorder.log()
     while simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
@@ -223,6 +274,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.video:
             timestep += 1
             if timestep == args_cli.video_length:
+                break
+        if recorder is not None:
+            recorder.log()
+            if recorder.done:
+                recorder.save(args_cli.record)
                 break
 
         sleep_time = dt - (time.time() - start_time)

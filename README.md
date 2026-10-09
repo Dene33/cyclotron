@@ -163,6 +163,24 @@ the pelvis IMU orientation relative to the reference pelvis and its angular velo
 and its previous action. To run it on the robot, the controller steps through the motion file at 50 Hz alongside the
 policy. `--share` and `--view` currently support the velocity policies only.
 
+## Compare policies side by side
+
+Render a reference motion and several trained policies next to each other, with an orthographic camera at 45°, to a
+video. Robots are drawn with Asimov 1's own meshes, so rendering needs no Isaac Sim window or RTX shaders. First
+record what each policy does with `--record`: the first robot's root pose and joint angles, over one pass of the
+reference motion (motion tracking tasks) or one episode, then `--play` exits.
+
+```bash
+./cyclotron.sh --play --task Asimov1-Tracking-Play-v0 --num_envs 1 --headless \
+    --load_run <run> --record rollouts/run1.npz
+./cyclotron.sh --render --motion motions/forward_jump.npz \
+    --rollout "rollouts/run1.npz:1 · Tracking" --rollout "rollouts/run2.npz:2 · + Lift" --out compare.mp4
+```
+
+The reference stands furthest back on the left, the rollouts follow in the order given, the last one front right.
+`--title` and `--caption` add a line of text at the top and bottom, and `--preview <seconds>` renders a single frame
+to a PNG instead of the video. Without `--motion` only the rollouts are drawn.
+
 ## Share your policy
 
 Share a finished run on the Hugging Face Hub. Log in first with
