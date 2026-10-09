@@ -407,14 +407,24 @@ class MotionCommand(CommandTerm):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         self.robot.write_root_link_pose_to_sim(torch.cat([root_pos, root_quat], dim=-1), env_ids=env_ids)
         self.robot.write_root_link_velocity_to_sim(torch.cat([root_lin_vel, root_ang_vel], dim=-1), env_ids=env_ids)
+        # Without this, the first step after the environment's first reset would compare the robot with no reference
+        # at all and end every episode.
+        self._move_reference_under_robot()
 
     def _update_command(self):
         self.time_steps += 1
         env_ids = torch.where(self.time_steps >= self.motion.num_frames)[0]
         self._resample_command(env_ids)
+        self._move_reference_under_robot()
 
-        # Reference body poses moved under the robot: the robot's horizontal anchor position and heading, with the
-        # reference's anchor height.
+        self.bin_failed_count = (
+            self.cfg.adaptive_alpha * self._current_bin_failed + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
+        )
+        self._current_bin_failed.zero_()
+
+    def _move_reference_under_robot(self):
+        """Reference body poses moved under the robot: the robot's horizontal anchor position and heading, with the
+        reference's anchor height."""
         num_bodies = len(self.cfg.body_names)
         anchor_pos_w = self.anchor_pos_w[:, None, :].repeat(1, num_bodies, 1)
         anchor_quat_w = self.anchor_quat_w[:, None, :].repeat(1, num_bodies, 1)
@@ -425,11 +435,6 @@ class MotionCommand(CommandTerm):
 
         self.body_quat_relative_w = quat_mul(delta_ori_w, self.body_quat_w)
         self.body_pos_relative_w = delta_pos_w + quat_apply(delta_ori_w, self.body_pos_w - anchor_pos_w)
-
-        self.bin_failed_count = (
-            self.cfg.adaptive_alpha * self._current_bin_failed + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
-        )
-        self._current_bin_failed.zero_()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
