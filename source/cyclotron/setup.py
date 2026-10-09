@@ -22,6 +22,7 @@ setup(
     package_data={"cyclotron": ["tasks/locomotion/motions/*.npz"]},
     include_package_data=True,
     install_requires=["numpy<2", "rsl-rl-lib==5.0.1", "huggingface_hub"],
+    extras_require={"sim2sim": ["mujoco", "onnxruntime"]},
     python_requires=">=3.10",
     classifiers=[
         "Natural Language :: English",

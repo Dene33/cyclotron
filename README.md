@@ -183,7 +183,8 @@ to a PNG instead of the video. Without `--motion` only the rollouts are drawn.
 
 ## Check a tracking policy
 
-Before trusting a tracking policy outside training, check how reliably it plays its motion.
+Before trusting a tracking policy outside the simulator it was trained in, check how reliably it plays its motion and
+whether it survives a different simulator.
 
 **Many randomised robots in Isaac Sim.** `--evaluate` starts 1024 robots on the reference's first frame and plays the
 motion to its end:
@@ -198,6 +199,19 @@ and sensor noise, `randomized` (the default) keeps the training randomisation wi
 pushes. `--motor_speed_ratio <r>` makes motor torque fall with speed, from each actuator's peak torque at standstill to
 zero at `r` times its maximum speed. Asimov 1's no-load speeds are not published but are at least the maximum speeds,
 so `1` is the weakest motor.
+
+**MuJoCo (sim2sim).** `--sim2sim` plays the exported policy on Asimov 1's published MJCF, with the gains, effort
+limits and timing from the run's `env.yaml`. It needs MuJoCo and ONNX Runtime
+(`uv pip install -e "source/cyclotron[sim2sim]"`).
+
+```bash
+./cyclotron.sh --play --task Asimov1-Tracking-Play-v0 --headless --load_run <run> --checkpoint model_3300.pt \
+    --export-only
+./cyclotron.sh --sim2sim logs/rsl_rl/asimov1_tracking/<run> --record rollouts/mujoco.npz
+```
+
+It prints whether the robot falls (training's pelvis height and tilt limits) and, with `--record`, saves the rollout
+for `--render`. `--delay`, `--motor_speed_ratio` and `--foot_friction` make it harder.
 
 ## Share your policy
 
