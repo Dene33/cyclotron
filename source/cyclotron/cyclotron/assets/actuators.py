@@ -49,6 +49,41 @@ class DelayedDCMotor(DelayedPDActuator):
         return torch.clip(effort, min=min_effort, max=max_effort)
 
 
+class TargetLimitedDelayedPDActuator(DelayedPDActuator):
+    """Delayed PD actuator that clamps its position targets, as Asimov 1's firmware clamps the ankle targets it is
+    sent (to 0.35 rad pitch and 0.1 rad roll) before driving the motors.
+
+    The clamp belongs to the robot, not to the policy: a runtime sends the policy's targets as they are, and the
+    firmware clamps them. So it is modelled here rather than as a clip of the action term, which would become part of
+    the policy's deployment contract.
+    """
+
+    cfg: TargetLimitedDelayedPDActuatorCfg
+
+    def __init__(self, cfg: TargetLimitedDelayedPDActuatorCfg, *args, **kwargs):
+        super().__init__(cfg, *args, **kwargs)
+        self.target_limit = self._parse_joint_parameter(cfg.target_limit, None)
+
+    def compute(
+        self, control_action: ArticulationActions, joint_pos: torch.Tensor, joint_vel: torch.Tensor
+    ) -> ArticulationActions:
+        if control_action.joint_positions is not None:
+            control_action.joint_positions = torch.clip(
+                control_action.joint_positions, min=-self.target_limit, max=self.target_limit
+            )
+        return super().compute(control_action, joint_pos, joint_vel)
+
+
+@configclass
+class TargetLimitedDelayedPDActuatorCfg(DelayedPDActuatorCfg):
+    """Configuration for :class:`TargetLimitedDelayedPDActuator`."""
+
+    class_type: type = TargetLimitedDelayedPDActuator
+
+    target_limit: dict[str, float] | float = MISSING
+    """Largest position target, either way, in rad."""
+
+
 @configclass
 class DelayedDCMotorCfg(DelayedPDActuatorCfg):
     """Configuration for :class:`DelayedDCMotor`."""
