@@ -5,7 +5,9 @@
 
 """Measure how reliably a motion tracking policy plays its whole motion.
 
-Many robots start on the reference's first frame and play it to the end under the training task's randomisation.
+Many robots start on the reference's first frame and play it to the end under the training task's randomisation. For
+the jump (``Asimov1-Jump-v0``), they start standing in the default pose, are told to jump after 1.5 s and hold their
+landing for 3 s.
 Reports the share that falls (any termination before the end) and when, how high and far the robots that finish
 get, their peak foot force, and for every motor its torque, speed and power: peaks against the limits, how long it
 spends at them, RMS torque and positive work. ``--save`` also writes these per robot, with physics-rate joint traces
@@ -89,7 +91,20 @@ def main():
         raise ValueError(f"{args_cli.task} is not a motion tracking task.")
 
     env_cfg.seed = args_cli.seed
-    env_cfg.commands.motion.start_from_first_frame = True
+    motion_cfg = env_cfg.commands.motion
+    jump = hasattr(motion_cfg, "stand_start_prob")  # Asimov1-Jump: the reference plays when the robot is told to jump
+    if jump:
+        # One jump, as on the robot: standing in the default pose for 1.5 s, then the command held through the jump
+        # and released 0.4 s after landing, then holding the landing for 3 s.
+        motion_cfg.stand_start_prob = 1.0
+        motion_cfg.default_pose_prob = 1.0
+        motion_cfg.stand_time_s = (1.5, 1.5)
+        motion_cfg.hold_time_s = (3.0, 3.0)
+        motion_cfg.release_after_landing_s = (0.4, 0.4)
+        motion_cfg.jump_again_prob = 0.0
+        motion_cfg.trigger_speed = (0.3, 0.3)
+    else:
+        motion_cfg.start_from_first_frame = True
     env_cfg.episode_length_s = 1.0e4  # the motion's end, not a time-out, ends the evaluation
     if args_cli.condition == "nominal":
         for name in list(vars(env_cfg.events)):
@@ -178,9 +193,10 @@ def main():
     reference = command.motion.root_pos_w
     forward = (reference[-1, :2] - reference[0, :2]) / torch.norm(reference[-1, :2] - reference[0, :2])
     terms = [name for name in base.termination_manager.active_terms if name != "time_out"]
-    num_frames = command.motion.num_frames
+    # One more step would start the motion (or the jump's cycle) again.
+    num_steps = command.cycle_steps if jump else command.motion.num_frames - 1
     with torch.inference_mode():
-        for step in range(1, num_frames):  # one more step would start the motion again
+        for step in range(1, num_steps + 1):
             obs, _, dones, _ = env.step(policy(obs))
             policy.reset(dones)
             max_height = torch.maximum(max_height, robot.data.root_link_pos_w[:, 2])
@@ -228,7 +244,8 @@ def main():
     print(
         f"\n[INFO] {checkpoint}\n[INFO] {args_cli.condition}"
         f"{f', motor speed ratio {args_cli.motor_speed_ratio:g}' if args_cli.motor_speed_ratio else ''}:"
-        f" {num_envs} robots, {num_frames / fps:.2f} s motion"
+        f" {num_envs} robots, {num_steps / fps:.2f} s"
+        f" {'of standing, one jump and holding the landing' if jump else 'motion'}"
     )
     print(f"Fell: {(~finished).sum()} of {num_envs} ({(~finished).mean() * 100:.1f}%)")
     if not finished.all():

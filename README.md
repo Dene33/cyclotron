@@ -344,16 +344,21 @@ its landing. The reference only shapes the rewards and the critic. The simulated
 ```bash
 ./cyclotron.sh --train --task Asimov1-Jump-v0 --motion_file motions/forward_jump.npz --num_envs 4096 --headless
 ./cyclotron.sh --play --task Asimov1-Jump-Play-v0 --num_envs 1 --headless --load_run <run> --record rollouts/jump.npz
+./cyclotron.sh --evaluate --task Asimov1-Jump-v0 --load_run <run> --condition randomized
 ./cyclotron.sh --export --checkpoint logs/rsl_rl/asimov1_jump/<run>/model_<n>.pt
 ./cyclotron.sh --compare-contract logs/rsl_rl/asimov1_jump/<run>/exported/policy.onnx Menlo/asimov1-locomotion-26-09-24
 ./cyclotron.sh --sim2sim logs/rsl_rl/asimov1_jump/<run> --command 0:1.5,0.3:2.0,0:2.5
 ```
 
-Play stands for 1.5 s, jumps once and holds the landing for 3 s; `--record` records that cycle. `--compare-contract`
-checks that two exported policies have the same deployment contract (the ONNX metadata a runtime checks: observations,
-joint order, action scales, offsets and clips, PD gains and rate) and lists every difference. `--share` publishes a jump
-with its own model card, without the reference motion, and only if its contract is the walking policy's
-(`--walking-repo`, default `Menlo/asimov1-locomotion-26-09-24`).
+Play stands for 1.5 s, jumps once and holds the landing for 3 s; `--record` records that cycle. `--evaluate` measures
+the same cycle on 1024 robots with the training randomisation (`nominal` turns it off; `pushes` adds pushes).
+`--compare-contract` checks that two exported policies have the same deployment contract (the ONNX metadata a runtime
+checks: observations, joint order, action scales, offsets and clips, PD gains and rate) and lists every difference.
+`--share` publishes a jump with its own model card, without the reference motion, and only if its contract is the
+walking policy's (`--walking-repo`, default `Menlo/asimov1-locomotion-26-09-24`).
+
+The first completed run's [validation results](docs/jump-validation.md) cover the deployment contract, randomized
+Isaac evaluation, MuJoCo robustness and the SDK runner against a simulated robot.
 
 ## Compare policies side by side
 
@@ -379,7 +384,8 @@ Before trusting a tracking policy outside the simulator it was trained in, check
 whether it survives a different simulator.
 
 **Many randomised robots in Isaac Sim.** `--evaluate` starts 1024 robots on the reference's first frame and plays the
-motion to its end:
+motion to its end. With `--task Asimov1-Jump-v0`, they start in the default standing pose, receive the jump command
+after 1.5 s and hold the landing for 3 s:
 
 ```bash
 ./cyclotron.sh --evaluate --load_run <run> --checkpoint model_3300.pt --condition pushes

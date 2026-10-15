@@ -31,11 +31,18 @@ class DelayedDCMotor(DelayedPDActuator):
         self.no_load_speed = self._parse_joint_parameter(cfg.no_load_speed, None)
         self.nominal_no_load_speed = self.no_load_speed.clone()
         self._joint_vel = torch.zeros_like(self.computed_effort)
+        self.target_limit = (
+            self._parse_joint_parameter(cfg.target_limit, None) if cfg.target_limit is not None else None
+        )
 
     def compute(
         self, control_action: ArticulationActions, joint_pos: torch.Tensor, joint_vel: torch.Tensor
     ) -> ArticulationActions:
         self._joint_vel[:] = joint_vel
+        if self.target_limit is not None and control_action.joint_positions is not None:
+            control_action.joint_positions = torch.clip(
+                control_action.joint_positions, min=-self.target_limit, max=self.target_limit
+            )
         return super().compute(control_action, joint_pos, joint_vel)
 
     def _clip_effort(self, effort: torch.Tensor) -> torch.Tensor:
@@ -95,3 +102,6 @@ class DelayedDCMotorCfg(DelayedPDActuatorCfg):
 
     no_load_speed: dict[str, float] | float = MISSING
     """Speed at which the motor can no longer produce torque, in rad/s."""
+
+    target_limit: dict[str, float] | float | None = None
+    """Largest position target, either way, in rad; None leaves targets unclamped."""
