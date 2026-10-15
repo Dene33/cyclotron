@@ -6,7 +6,7 @@ CYCLOTRON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PYTHON_EXE="${PYTHON_EXE:-python}"
 
 usage() {
-    echo "Usage: $0 {--install|--list|--csv-to-npz|--train|--play|--evaluate|--sim2sim|--render|--share|--view} [arguments]"
+    echo "Usage: $0 {--install|--list|--csv-to-npz|--train|--play|--evaluate|--sim2sim|--sim2real|--mujoco-edge|--render|--share|--view} [arguments]"
 }
 
 case "${1:-}" in
@@ -36,6 +36,17 @@ case "${1:-}" in
     --sim2sim)
         shift
         "${PYTHON_EXE}" "${CYCLOTRON_ROOT}/scripts/sim2sim_mujoco.py" "$@"
+        ;;
+    --sim2real|--mujoco-edge)
+        # menlo-sdk needs Python 3.12 or newer, so these run in their own uv environment rather than Isaac Lab's.
+        # MENLO_SDK picks the SDK: a pip requirement (default menlo-sdk), or a local checkout, installed editable.
+        SCRIPT="sim2real.py"
+        [ "$1" = "--mujoco-edge" ] && SCRIPT="mujoco_edge.py"
+        shift
+        MENLO_SDK="${MENLO_SDK:-menlo-sdk}"
+        if [ -d "${MENLO_SDK}" ]; then SDK_ARGS=(--with-editable "${MENLO_SDK}"); else SDK_ARGS=(--with "${MENLO_SDK}"); fi
+        exec uv run --no-project --python 3.12 "${SDK_ARGS[@]}" --with onnxruntime --with mujoco --with numpy \
+            --with scipy --with pyyaml python "${CYCLOTRON_ROOT}/scripts/${SCRIPT}" "$@"
         ;;
     -r|--render)
         shift

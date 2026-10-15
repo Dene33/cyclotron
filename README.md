@@ -216,6 +216,36 @@ limits and timing from the run's `env.yaml`. It needs MuJoCo and ONNX Runtime
 It prints whether the robot falls (training's pelvis height and tilt limits) and, with `--record`, saves the rollout
 for `--render`. `--delay`, `--motor_speed_ratio` and `--foot_friction` make it harder.
 
+**On the real robot (sim2real).** `--sim2real` plays the exported policy on Asimov 1 through
+[menlo-sdk](https://github.com/menloresearch/menlo-sdk): it reads the robot's state at 200 Hz over UDP, builds the
+policy's observation, and streams joint targets at 50 Hz with the run's PD gains. It runs in its own Python 3.12
+environment (uv); set `MENLO_SDK=/path/to/menlo-sdk` to use a local checkout of the SDK. Asimov Edge must run with
+`udp-control` on and send its state to this machine (`udp-state-host`).
+
+```bash
+./cyclotron.sh --sim2real --host <robot> check logs/rsl_rl/asimov1_tracking/<run>    # sends nothing
+./cyclotron.sh --sim2real --host <robot> dry-run logs/rsl_rl/asimov1_tracking/<run>  # policy on live state, sends nothing
+./cyclotron.sh --sim2real --host <robot> run logs/rsl_rl/asimov1_tracking/<run>      # moves the robot
+```
+
+`check` reports the state rate, the IMU and every joint in the policy's frame, and flags joints outside the URDF's
+limits (a sign or ankle conversion error). `run` needs the robot hanging from its gantry hook with both feet on the
+floor, in STAND and armed. The policy first balances the robot from STAND into the motion's first frame (`--settle`,
+1 s), then plays the motion, holds its last frame (`--hold`, 1 s), and DAMPs; `--end balance` hands back to the walking
+policy instead, which menlo-sdk does not document after joint control. `dry-run` and `run` log every step to
+`<run>/sim2real/`. The firmware limits ankle targets to ±0.35 rad pitch and ±0.1 rad roll, so targets are clamped to
+the URDF's joint limits. Training does not clamp them, and a policy that pushes its ankles against their stops loses
+that push on the robot: the forward jump rises 8 cm instead of 14 cm in MuJoCo with clamped ankle targets.
+
+`--mujoco-edge` stands in for the robot: Asimov 1 in MuJoCo behind Asimov Edge's UDP protocol, following the
+firmware's mode rules, so `--sim2real` can be tested end to end on one machine. `--viewer` shows the robot live in
+MuJoCo's viewer, and `--record` saves its motion for `--render`:
+
+```bash
+./cyclotron.sh --mujoco-edge logs/rsl_rl/asimov1_tracking/<run> --record rollouts/edge.npz
+./cyclotron.sh --sim2real --host 127.0.0.1 run logs/rsl_rl/asimov1_tracking/<run> --yes
+```
+
 ## Share your policy
 
 Share a finished run on the Hugging Face Hub. Log in first with

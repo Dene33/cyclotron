@@ -132,6 +132,49 @@ def projected_gravity_z(quat: np.ndarray) -> float:
     return float(Rotation.from_quat(quat[[1, 2, 3, 0]]).inv().apply([0.0, 0.0, -1.0])[2])
 
 
+def load_reference(run: TrackingRun) -> dict[str, np.ndarray]:
+    """The run's reference motion at the policy rate: joint positions and velocities in the policy's joint order, and
+    the pelvis position and orientation (w, x, y, z) in the world."""
+    motion = np.load(run.motion_file)
+    if [str(name) for name in motion["joint_names"]] != run.joint_names:
+        raise ValueError(f"{run.motion_file} does not list the policy's joints in the policy's order.")
+    fps = 1.0 / (run.physics_dt * run.decimation)
+    if abs(float(np.asarray(motion["fps"]).item()) - fps) > 1e-6:
+        raise ValueError(f"{run.motion_file} is not at the policy rate of {fps:g} Hz.")
+    return {
+        "joint_pos": motion["joint_pos"],
+        "joint_vel": motion["joint_vel"],
+        "pelvis_pos": motion["body_pos_w"][:, 0],  # pelvis_link
+        "pelvis_quat": motion["body_quat_w"][:, 0],
+    }
+
+
+def tracking_observation(
+    reference_q: np.ndarray,
+    reference_dq: np.ndarray,
+    reference_quat: np.ndarray,
+    robot_quat: np.ndarray,
+    ang_vel: np.ndarray,
+    joint_pos_rel: np.ndarray,
+    joint_vel: np.ndarray,
+    action: np.ndarray,
+) -> np.ndarray:
+    """The ``Asimov1-Tracking`` policy observation (``POLICY_OBSERVATIONS``) from one reference frame and what the
+    robot measures: its pelvis orientation (w, x, y, z), the pelvis angular velocity in the pelvis frame, joint
+    positions relative to the default pose, joint velocities and the last action."""
+    return np.concatenate(
+        [
+            reference_q,
+            reference_dq,
+            anchor_orientation_6d(robot_quat, reference_quat),
+            ang_vel,
+            joint_pos_rel,
+            joint_vel,
+            action,
+        ]
+    ).astype(np.float32)
+
+
 def play(
     run: TrackingRun,
     policy: Callable[[np.ndarray], np.ndarray],
@@ -153,14 +196,10 @@ def play(
     """
     import mujoco
 
-    motion = np.load(run.motion_file)
-    if [str(name) for name in motion["joint_names"]] != run.joint_names:
-        raise ValueError(f"{run.motion_file} does not list the policy's joints in the policy's order.")
+    reference = load_reference(run)
     fps = 1.0 / (run.physics_dt * run.decimation)
-    if abs(float(np.asarray(motion["fps"]).item()) - fps) > 1e-6:
-        raise ValueError(f"{run.motion_file} is not at the policy rate of {fps:g} Hz.")
-    reference_q, reference_dq = motion["joint_pos"], motion["joint_vel"]
-    reference_pos, reference_quat = motion["body_pos_w"][:, 0], motion["body_quat_w"][:, 0]  # pelvis_link
+    reference_q, reference_dq = reference["joint_pos"], reference["joint_vel"]
+    reference_pos, reference_quat = reference["pelvis_pos"], reference["pelvis_quat"]
 
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
@@ -186,17 +225,16 @@ def play(
     }
     fell_at = -1.0
     for frame in range(len(reference_q) - 1):
-        obs = np.concatenate(
-            [
-                reference_q[frame],
-                reference_dq[frame],
-                anchor_orientation_6d(data.qpos[3:7], reference_quat[frame]),
-                data.qvel[3:6],  # free joint angular velocity, in the pelvis frame
-                data.qpos[qpos] - run.default_joint_pos,
-                data.qvel[qvel],
-                action,
-            ]
-        ).astype(np.float32)
+        obs = tracking_observation(
+            reference_q[frame],
+            reference_dq[frame],
+            reference_quat[frame],
+            data.qpos[3:7],
+            data.qvel[3:6],  # free joint angular velocity, in the pelvis frame
+            data.qpos[qpos] - run.default_joint_pos,
+            data.qvel[qvel],
+            action,
+        )
         action = np.asarray(policy(obs), dtype=np.float32)
         target = run.default_joint_pos + run.action_scale * action
         for _ in range(run.decimation):
