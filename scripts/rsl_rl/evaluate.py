@@ -7,7 +7,9 @@
 
 Many robots start on the reference's first frame and play it to the end under the training task's randomisation.
 Reports the share that falls (any termination before the end) and when, how high and far the robots that finish
-get, and the peaks of their joint speed, motor torque and foot force.
+get, their peak foot force, and for every motor its torque, speed and power: peaks against the limits, how long it
+spends at them, RMS torque and positive work. ``--save`` also writes these per robot, with physics-rate joint traces
+of the first robots, for analysis outside Isaac Sim.
 """
 
 import argparse
@@ -34,6 +36,13 @@ parser.add_argument(
     " The real value is not published but is at least 1, the weakest motor.",
 )
 parser.add_argument("--seed", type=int, default=1, help="Seed for the randomisation.")
+parser.add_argument(
+    "--save",
+    type=str,
+    default=None,
+    help="Also save the results per robot, and physics-rate joint traces of the first --save_robots robots (.npz).",
+)
+parser.add_argument("--save_robots", type=int, default=16, help="How many robots' joint traces --save keeps.")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -61,6 +70,12 @@ from cyclotron.assets.robots.asimov_1 import asimov_1_dc_motor_actuators
 
 installed_version = metadata.version("rsl-rl-lib")
 FEET = ["left_ankle_roll_link", "right_ankle_roll_link"]
+# A motor is torque limited when it applies this much less torque (N·m) than the policy's command needs, and speed
+# limited at this share of its speed limit or faster.
+TORQUE_TOLERANCE = 1.0e-3
+SPEED_LIMIT_SHARE = 0.98
+# Joint quantities --save records at every physics step.
+TRACES = ("joint_pos", "joint_vel", "applied_torque", "computed_torque")
 
 
 def main():
@@ -87,7 +102,7 @@ def main():
         env_cfg.events.push_robot = None
     if args_cli.motor_speed_ratio is not None:
         env_cfg.scene.robot = env_cfg.scene.robot.replace(
-            actuators=asimov_1_dc_motor_actuators(args_cli.motor_speed_ratio)
+            actuators=asimov_1_dc_motor_actuators(args_cli.motor_speed_ratio, env_cfg.scene.robot.actuators)
         )
 
     env = RslRlVecEnvWrapper(gym.make(args_cli.task, cfg=env_cfg), clip_actions=agent_cfg.clip_actions)
@@ -102,29 +117,58 @@ def main():
         base.scene["contact_forces"],
     )
     feet = contacts.find_bodies(FEET, preserve_order=True)[0]
-    num_envs, device = base.num_envs, base.device
-    effort_limit = torch.zeros(num_envs, robot.num_joints, device=device)
+    num_envs, num_joints, device = base.num_envs, robot.num_joints, base.device
+    effort_limit = torch.zeros(num_envs, num_joints, device=device)
     for actuator in robot.actuators.values():
         effort_limit[:, actuator.joint_indices] = actuator.effort_limit
-    peak_speed = torch.zeros(num_envs, robot.num_joints, device=device)
-    peak_torque = torch.zeros_like(peak_speed)
-    speed_loss = torch.zeros_like(peak_speed)  # torque the motor's speed limit took away, beyond the effort limit
+    speed_limit = robot.data.joint_vel_limits.clone()
+    # Per robot and motor, over the motion until the robot falls.
+    motors = {
+        name: torch.zeros(num_envs, num_joints, device=device)
+        for name in (
+            "peak_torque",
+            "peak_speed",
+            "peak_power",
+            "torque_limited_time",  # s the motor gave less torque than the policy's command needed
+            "speed_limited_time",  # s at SPEED_LIMIT_SHARE of the speed limit or faster
+            "torque_squared_time",  # integral of torque squared over time, for the RMS torque
+            "positive_work",  # J the motor put in
+            "speed_loss",  # torque the motor's speed limit took away, beyond the effort limit
+        )
+    }
+    elapsed = torch.zeros(num_envs, device=device)
     peak_force = torch.zeros(num_envs, device=device)
     failed_at = torch.full((num_envs,), -1, dtype=torch.long, device=device)
     failed_by = [""] * num_envs
+    traced = min(args_cli.save_robots, num_envs)
+    traces = {key: [] for key in TRACES} if args_cli.save else None
 
-    # Peaks at every physics step, not just every policy step, so short impacts are seen.
+    # At every physics step, not just every policy step, so short impacts and saturations are seen.
     update_scene = base.scene.update
 
     def update_and_record(dt: float):
         update_scene(dt)
-        alive = failed_at < 0
-        peak_speed[alive] = torch.maximum(peak_speed[alive], robot.data.joint_vel[alive].abs())
-        peak_torque[alive] = torch.maximum(peak_torque[alive], robot.data.applied_torque[alive].abs())
-        lost = torch.minimum(robot.data.computed_torque.abs(), effort_limit) - robot.data.applied_torque.abs()
-        speed_loss[alive] = torch.maximum(speed_loss[alive], lost[alive])
+        data = robot.data
+        alive = (failed_at < 0).unsqueeze(1)
+        torque, speed, power = data.applied_torque.abs(), data.joint_vel.abs(), data.applied_torque * data.joint_vel
+        peaks = {
+            "peak_torque": torque,
+            "peak_speed": speed,
+            "peak_power": power.abs(),
+            "speed_loss": torch.minimum(data.computed_torque.abs(), effort_limit) - torque,
+        }
+        for name, value in peaks.items():
+            motors[name] = torch.where(alive, torch.maximum(motors[name], value), motors[name])
+        motors["torque_limited_time"] += (alive & (data.computed_torque.abs() - torque > TORQUE_TOLERANCE)) * dt
+        motors["speed_limited_time"] += (alive & (speed >= SPEED_LIMIT_SHARE * speed_limit)) * dt
+        motors["torque_squared_time"] += alive * torque.square() * dt
+        motors["positive_work"] += alive * power.clamp(min=0.0) * dt
+        elapsed.add_(alive[:, 0] * dt)
         force = contacts.data.net_forces_w[:, feet].norm(dim=-1).amax(dim=-1)
-        peak_force[alive] = torch.maximum(peak_force[alive], force[alive])
+        peak_force[alive[:, 0]] = torch.maximum(peak_force[alive[:, 0]], force[alive[:, 0]])
+        if traces is not None:
+            for key, values in traces.items():
+                values.append(getattr(data, key)[:traced].clone())
 
     base.scene.update = update_and_record
 
@@ -145,9 +189,42 @@ def main():
                 failed_by[i] = "+".join(name for name in terms if bool(base.termination_manager.get_term(name)[i]))
     finished = (failed_at < 0).cpu().numpy()
     travel = ((robot.data.root_link_pos_w[:, :2] - start_pos[:, :2]) @ forward).cpu().numpy()
-    rise = ((max_height - start_pos[:, 2]) * 100).cpu().numpy()
-
+    rise = (max_height - start_pos[:, 2]).cpu().numpy()
+    weight = float(robot.data.default_mass[0].sum()) * 9.81
+    results = {name: value.cpu().numpy() for name, value in motors.items()}
+    duration = elapsed.cpu().numpy()
+    results["rms_torque"] = np.sqrt(results.pop("torque_squared_time") / np.maximum(duration, 1.0e-9)[:, None])
+    names = robot.joint_names
+    effort, speed = effort_limit[0].cpu().numpy(), speed_limit[0].cpu().numpy()
+    if args_cli.save:
+        info = {
+            "checkpoint": checkpoint,
+            "motion_file": env_cfg.commands.motion.motion_file,
+            "condition": args_cli.condition,
+            "motor_speed_ratio": np.nan if args_cli.motor_speed_ratio is None else args_cli.motor_speed_ratio,
+            "seed": args_cli.seed,
+            "physics_dt": base.physics_dt,
+            "decimation": env_cfg.decimation,
+            "joint_names": np.array(names),
+            "effort_limit": effort,
+            "speed_limit": speed,
+        }
+        per_robot = {
+            "failed_at": failed_at.cpu().numpy(),  # policy step of the fall, -1 if the robot finished
+            "finished": finished,
+            "pelvis_rise": rise,  # m
+            "travel": travel,  # m, along the reference's direction of travel
+            "peak_foot_force": (peak_force / weight).cpu().numpy(),  # x body weight
+            "duration": duration,  # s the motors were measured
+            **results,
+        }
+        save(args_cli.save, info, per_robot, traces)
     fps = command.motion.fps
+    order = list(command.joint_ids) + [j for j in range(num_joints) if j not in command.joint_ids]  # policy order
+    # Everything is measured. Closing the environment before the report means no early return can leave Isaac Sim
+    # hanging when it closes.
+    env.close()
+
     print(
         f"\n[INFO] {checkpoint}\n[INFO] {args_cli.condition}"
         f"{f', motor speed ratio {args_cli.motor_speed_ratio:g}' if args_cli.motor_speed_ratio else ''}:"
@@ -169,24 +246,50 @@ def main():
         return f"{mid:.{digits}f} ({low:.{digits}f} to {high:.{digits}f})"
 
     print("Robots that finished, median (5th to 95th percentile):")
-    print(f"  pelvis rise {spread(rise[finished])} cm, travel {spread(travel[finished], 2)} m")
-    names = robot.joint_names
-    speed_limit = robot.data.joint_vel_limits[0].cpu().numpy()
-    effort = effort_limit[0].cpu().numpy()
-    peaks = [("joint speed", peak_speed, speed_limit, "rad/s"), ("torque", peak_torque, effort, "N·m")]
-    if args_cli.motor_speed_ratio is not None:
-        peaks.append(("torque lost to speed", speed_loss, effort, "N·m"))
-    for label, values, limit, unit in peaks:
-        values = values.cpu().numpy()[finished]
-        top = np.argsort(-np.median(values / limit, axis=0))[:4]
-        print(
-            f"  peak {label}: "
-            + "; ".join(f"{names[j]} {np.median(values[:, j]):.1f} of {limit[j]:.1f} {unit}" for j in top)
-        )
-    weight = float(robot.data.default_mass[0].sum()) * 9.81
+    print(f"  pelvis rise {spread(rise[finished] * 100)} cm, travel {spread(travel[finished], 2)} m")
     force = peak_force.cpu().numpy()[finished]
     print(f"  peak foot force {spread(force / weight)} x body weight")
-    env.close()
+
+    # One row per motor, in the policy's joint order.
+    median = {name: np.median(value[finished], axis=0) for name, value in results.items()}
+    width = max(len(name) for name in names)
+    dc = args_cli.motor_speed_ratio is not None
+    print(
+        f"Motors of the robots that finished, median. Limited: torque below what the command needs, or speed at"
+        f" {SPEED_LIMIT_SHARE:.0%} of the limit or more."
+    )
+    print(
+        f"  {'':{width}}  {'torque N·m':^13}  {'limited':>7}  {'RMS':>5}  {'speed rad/s':^13}  {'limited':>7}"
+        f"  {'power W':>7}  {'work J':>6}" + ("  lost to speed N·m" if dc else "")
+    )
+    print(
+        f"  {'motor':{width}}  {'peak / limit':^13}  {'':>7}  {'':>5}  {'peak / limit':^13}  {'':>7}  {'peak':>7}"
+        f"  {'+':>6}"
+    )
+    for j in order:
+        row = (
+            f"  {names[j]:{width}}  {median['peak_torque'][j]:5.1f} / {effort[j]:5.1f}"
+            f"  {median['torque_limited_time'][j] * 1000:4.0f} ms  {median['rms_torque'][j]:5.1f}"
+            f"  {median['peak_speed'][j]:5.1f} / {speed[j]:5.1f}  {median['speed_limited_time'][j] * 1000:4.0f} ms"
+            f"  {median['peak_power'][j]:7.0f}  {median['positive_work'][j]:6.1f}"
+        )
+        if dc:
+            row += f"  {median['speed_loss'][j]:18.1f}"
+        print(row)
+
+
+def save(path: str, info: dict, per_robot: dict, traces: dict[str, list[torch.Tensor]]) -> None:
+    """The evaluation's settings, its results per robot, and the first robots' joint traces at every physics step,
+    shaped (robots, steps, joints) and named ``trace_<quantity>``.
+
+    A robot's trace is its own motion only up to physics step ``failed_at * decimation``: after a fall the robot is
+    reset onto the motion's first frame.
+    """
+    path = os.path.abspath(os.path.expanduser(path))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    trace_arrays = {f"trace_{key}": torch.stack(values, dim=1).cpu().numpy() for key, values in traces.items()}
+    np.savez(path, **info, **per_robot, **trace_arrays)
+    print(f"[INFO] Saved {path}")
 
 
 if __name__ == "__main__":

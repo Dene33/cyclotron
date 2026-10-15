@@ -194,11 +194,14 @@ motion to its end:
 ```
 
 It reports how many fall (any of the training terminations before the end) and when, how high and far the others
-get, and the peaks of their joint speed, motor torque and foot force. `--condition nominal` turns off randomisation
-and sensor noise, `randomized` (the default) keeps the training randomisation without pushes, and `pushes` adds the
-pushes. `--motor_speed_ratio <r>` makes motor torque fall with speed, from each actuator's peak torque at standstill to
-zero at `r` times its maximum speed. Asimov 1's no-load speeds are not published but are at least the maximum speeds,
-so `1` is the weakest motor.
+get, their peak foot force, and a table of every motor: peak torque and speed against their limits, how long the motor
+was torque limited (it gave less torque than the policy's command needed) or at its speed limit, RMS torque, peak
+power and the work it put in. `--condition nominal` turns off randomisation and sensor noise, `randomized` (the
+default) keeps the training randomisation without pushes, and `pushes` adds the pushes. `--motor_speed_ratio <r>`
+makes motor torque fall with speed, from each actuator's peak torque at standstill to zero at `r` times its maximum
+speed, and adds a column for the torque this takes away. Asimov 1's no-load speeds are not published but are at least
+the maximum speeds, so `1` is the weakest motor. `--save results.npz` also writes the results per robot, and the joint
+positions, speeds and torques of the first 16 robots (`--save_robots`) at every physics step.
 
 **MuJoCo (sim2sim).** `--sim2sim` plays the exported policy on Asimov 1's published MJCF, with the gains, effort
 limits and timing from the run's `env.yaml`. It needs MuJoCo and ONNX Runtime
