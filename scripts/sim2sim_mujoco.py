@@ -51,8 +51,8 @@ def main() -> None:
     onnx_path = Path(args.onnx).expanduser() if args.onnx else run_dir / "exported" / "policy.onnx"
     if not onnx_path.is_file():
         sys.exit(
-            f"[ERROR] No policy at {onnx_path}. Export one with: ./cyclotron.sh --play --task Asimov1-Tracking-Play-v0"
-            f" --headless --load_run {run_dir.name} --checkpoint <model_N.pt> --export-only"
+            f"[ERROR] No policy at {onnx_path}. Export one with: ./cyclotron.sh --export --checkpoint"
+            f" {run_dir}/model_<N>.pt"
         )
     run = TrackingRun.load(run_dir)
     session = onnxruntime.InferenceSession(str(onnx_path))

@@ -1,12 +1,46 @@
-"""Prepare a training run for sharing on the Hugging Face Hub with ``./cyclotron.sh --share``.
+"""Prepare a training run for ``./cyclotron.sh --export`` and ``--share``.
 
 Plain Python with no Isaac Lab imports, so it can run without Isaac Sim and in tests.
 """
 
 from __future__ import annotations
 
+import hashlib
 import ntpath
+import os
 import re
+
+# Training task for each experiment name, so a run can be exported without passing --task.
+EXPERIMENT_TASKS = {
+    "asimov1_velocity": "Asimov1-Velocity-v0",
+    "asimov_velocity_amp": "Asimov1-Velocity-AMP-v0",
+    "asimov1_tracking": "Asimov1-Tracking-v0",
+}
+
+
+def checkpoints(run_dir: str) -> list[str]:
+    """The run's ``model_<iteration>.pt`` checkpoint files, oldest iteration first."""
+    names = [name for name in os.listdir(run_dir) if re.fullmatch(r"model_\d+\.pt", name)]
+    return sorted(names, key=lambda name: int(name[len("model_") : -len(".pt")]))
+
+
+def read_experiment_name(agent_yaml_path: str) -> str | None:
+    """Return ``experiment_name`` from a run's ``params/agent.yaml``, without loading Isaac Lab's yaml tags."""
+    with open(agent_yaml_path) as f:
+        match = re.search(r"^experiment_name: *(\S+)", f.read(), re.MULTILINE)
+    return match.group(1).strip("'\"") if match else None
+
+
+def infer_task(run_dir: str) -> str:
+    """Return the training task of a run directory, from the experiment name in its ``params/agent.yaml``."""
+    agent_yaml_path = os.path.join(run_dir, "params", "agent.yaml")
+    if not os.path.isfile(agent_yaml_path):
+        raise ValueError(f"Cannot infer the task: {agent_yaml_path} not found. Pass it with --task.")
+    experiment_name = read_experiment_name(agent_yaml_path)
+    if experiment_name not in EXPERIMENT_TASKS:
+        raise ValueError(f"Cannot infer the task for experiment '{experiment_name}'. Pass it with --task.")
+    return EXPERIMENT_TASKS[experiment_name]
+
 
 # Keys holding files on the training machine, e.g. asset_path, cache_dir, motion_files. USD prim paths (prim_path,
 # filter_prim_paths_expr, ...) also start with "/" but name scene objects, not files, so they are kept.
@@ -76,7 +110,7 @@ motion at run time, so the motion file is part of the policy.
   being the pelvis.
 - `env.yaml` and `agent.yaml`: the training task and PPO settings, including the joint order, default pose, PD gains
   and effort limits.
-
+{extra_files}
 ## Running it
 
 Start with the robot in the motion's first pose. Then every {step_ms:g} ms, for frame `t` = 0, 1, 2, ... of the motion:
@@ -116,8 +150,10 @@ def tracking_model_card(
     code_url: str,
     checkpoint: str | None = None,
     motion_source: str | None = None,
+    extra_files: str = "",
 ) -> str:
-    """Model card (README.md) for a shared motion tracking policy."""
+    """Model card (README.md) for a shared motion tracking policy. ``extra_files`` lists further uploaded files, one
+    markdown list item per line."""
     return TRACKING_CARD.format(
         title=title,
         summary=summary,
@@ -130,4 +166,14 @@ def tracking_model_card(
         code_name=link_text(code_url),
         checkpoint=f"Checkpoint `{checkpoint}`. " if checkpoint else "",
         motion_source=f"\n## Reference motion\n\n{motion_source}\n" if motion_source else "",
+        extra_files=extra_files,
     )
+
+
+def rehash_uploaded_run_configs(code_state: str, recorded: dict[str, str], uploaded: dict[str, str]) -> str:
+    """Point a run's ``code_state.yaml`` text at the copies of ``env.yaml`` and ``agent.yaml`` being uploaded, which
+    have local paths stripped: each sha256 training recorded (``recorded``) becomes that of the uploaded text."""
+    for name, digest in recorded.items():
+        if name in uploaded:
+            code_state = code_state.replace(digest, hashlib.sha256(uploaded[name].encode()).hexdigest())
+    return code_state

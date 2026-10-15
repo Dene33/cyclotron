@@ -9,12 +9,11 @@ from itertools import chain
 
 import torch
 import torch.nn as nn
-from tensordict import TensorDict
-
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_callable
+from tensordict import TensorDict
 
 from .discriminator import AMPDiscriminator
 from .replay_buffer import AMPReplayBuffer
@@ -394,9 +393,14 @@ class AMPPPO(PPO):
     def _sync_discriminator_normalizer(self) -> None:
         if not self.discriminator.feature_normalization:
             return
-        state = [self.discriminator.feature_norm.state_dict()]
-        torch.distributed.broadcast_object_list(state, src=0)
-        self.discriminator.feature_norm.load_state_dict(state[0])
+        self._broadcast_module_state(self.discriminator.feature_norm)
+
+    @staticmethod
+    def _broadcast_module_state(module: nn.Module) -> None:
+        # State tensors share storage with the module. Direct broadcasts avoid
+        # serializing CUDA model state through an object collective.
+        for tensor in module.state_dict().values():
+            torch.distributed.broadcast(tensor, src=0)
 
     def reduce_parameters(self) -> None:
         params = list(self.actor.parameters())
@@ -417,10 +421,11 @@ class AMPPPO(PPO):
             offset += numel
 
     def broadcast_parameters(self) -> None:
-        super().broadcast_parameters()
-        disc_params = [self.discriminator.state_dict()]
-        torch.distributed.broadcast_object_list(disc_params, src=0)
-        self.discriminator.load_state_dict(disc_params[0])
+        self._broadcast_module_state(self.actor)
+        self._broadcast_module_state(self.critic)
+        if self.rnd:
+            self._broadcast_module_state(self.rnd.predictor)
+        self._broadcast_module_state(self.discriminator)
 
     def train_mode(self) -> None:
         super().train_mode()
@@ -444,6 +449,7 @@ class AMPPPO(PPO):
                 "optimizer": True,
                 "iteration": True,
                 "rnd": True,
+                "discriminator": True,
             }
 
         split_optimizer = "amp_optimizer_state_dict" in loaded_dict
@@ -452,7 +458,10 @@ class AMPPPO(PPO):
             ppo_load_cfg["optimizer"] = False
         load_iteration = super().load(loaded_dict, ppo_load_cfg, strict)
 
-        if "discriminator_state_dict" in loaded_dict:
+        # Export and play load only the actor, so a discriminator that no longer fits doesn't stop them. A load_cfg
+        # that doesn't say follows the critic: restoring training state restores the discriminator with it.
+        load_discriminator = requested_load_cfg.get("discriminator", requested_load_cfg.get("critic"))
+        if load_discriminator and "discriminator_state_dict" in loaded_dict:
             self.discriminator.load_state_dict(loaded_dict["discriminator_state_dict"], strict=strict)
         if split_optimizer and requested_load_cfg.get("optimizer"):
             self._load_split_optimizer_states(

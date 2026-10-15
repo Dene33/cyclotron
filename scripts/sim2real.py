@@ -402,7 +402,8 @@ def play_command(args) -> None:
     run_dir = Path(args.run_dir).expanduser()
     onnx_path = Path(args.onnx).expanduser() if args.onnx else run_dir / "exported" / "policy.onnx"
     if not onnx_path.is_file():
-        sys.exit(f"[ERROR] No policy at {onnx_path}. Export one with ./cyclotron.sh --play ... --export-only.")
+        sys.exit(f"[ERROR] No policy at {onnx_path}. Export one with ./cyclotron.sh --export --checkpoint"
+                 f" {run_dir}/model_<N>.pt")
     run = TrackingRun.load(run_dir)
     joint_map = JointMap(run.joint_names)
     controller = TrackingController(run, load_policy(onnx_path), load_joint_limits(args.urdf, run.joint_names))
