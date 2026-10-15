@@ -6,7 +6,7 @@ CYCLOTRON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PYTHON_EXE="${PYTHON_EXE:-python}"
 
 usage() {
-    echo "Usage: $0 {--install|--list|--csv-to-npz|--train|--play|--export|--evaluate|--sim2sim|--sim2real|--mujoco-edge|--render|--share|--view} [arguments]"
+    echo "Usage: $0 {--install|--list|--csv-to-npz|--train|--play|--export|--evaluate|--sim2sim|--compare-contract|--sim2real|--mujoco-edge|--render|--share|--view} [arguments]"
 }
 
 case "${1:-}" in
@@ -40,6 +40,10 @@ case "${1:-}" in
     --sim2sim)
         shift
         "${PYTHON_EXE}" "${CYCLOTRON_ROOT}/scripts/sim2sim_mujoco.py" "$@"
+        ;;
+    --compare-contract)
+        shift
+        "${PYTHON_EXE}" "${CYCLOTRON_ROOT}/scripts/compare_contract.py" "$@"
         ;;
     --sim2real|--mujoco-edge)
         # menlo-sdk needs Python 3.12 or newer, so these run in their own uv environment rather than Isaac Lab's.
