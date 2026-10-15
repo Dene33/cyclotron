@@ -180,3 +180,26 @@ def test_tracking_model_card_leaves_out_what_is_not_known():
 def test_link_text_drops_the_scheme_and_github_host():
     assert link_text("https://github.com/menloresearch/cyclotron") == "menloresearch/cyclotron"
     assert link_text("https://example.org/models/") == "example.org/models"
+
+
+def test_jump_model_card_says_how_to_trigger_the_jump():
+    from cyclotron.hub import jump_model_card
+
+    card = jump_model_card(
+        title="Jump",
+        summary="A jump.",
+        walking="[Menlo/walk](https://huggingface.co/Menlo/walk)",
+        motion="jump.npz",
+        speed=0.3,
+        speed_range=(0.25, 0.4),
+        hold_s=2.24,
+        landing_s=1.4,
+        code_url="https://github.com/me/cyclotron",
+        checkpoint="model_3999.pt",
+        motion_source="CMU 13_11.",
+    )
+    assert card.startswith("---\nlibrary_name: asimov\n")
+    assert "A forward speed of 0.3 m/s (it was trained with 0.25 to 0.4), held for the whole jump" in card
+    assert "about 2.2 s" in card and "about 1.4 s after the command starts" in card
+    assert "[Menlo/walk](https://huggingface.co/Menlo/walk)" in card and "Checkpoint `model_3999.pt`." in card
+    assert "Reference motion: CMU 13_11." in card and "[me/cyclotron](https://github.com/me/cyclotron)" in card

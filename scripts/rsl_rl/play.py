@@ -47,7 +47,8 @@ parser.add_argument(
     "--record_steps",
     type=int,
     default=None,
-    help="Steps to record. Default: one pass of the reference motion for motion tracking tasks, else one episode.",
+    help="Steps to record. Default: one pass of the reference motion for motion tracking tasks (one cycle of standing,"
+    " jumping and holding the landing for the jump), else one episode.",
 )
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
@@ -127,8 +128,11 @@ class RolloutRecorder:
         self.origin = env.scene.env_origins[0]
         commands = env.command_manager.active_terms
         self.motion = env.command_manager.get_term("motion") if "motion" in commands else None
-        if steps is None:
-            steps = self.motion.motion.num_frames - 1 if self.motion is not None else int(env.max_episode_length)
+        if steps is None and self.motion is not None:
+            # One pass of the reference motion, or for the jump one cycle: standing, the jump, holding the landing.
+            steps = getattr(self.motion, "cycle_steps", self.motion.motion.num_frames - 1)
+        elif steps is None:
+            steps = int(env.max_episode_length)
         self.steps = steps
         self.fps = 1.0 / env.step_dt
         self.data = {"frame": [], "root_pos": [], "root_quat": [], "joint_pos": []}
@@ -139,7 +143,10 @@ class RolloutRecorder:
 
     def log(self) -> None:
         # For motion tracking tasks, the reference frame the robot is following; otherwise the step.
-        frame = self.motion.time_steps[0].item() if self.motion is not None else len(self.data["frame"])
+        if self.motion is not None:
+            frame = getattr(self.motion, "shown_frames", self.motion.time_steps)[0].item()
+        else:
+            frame = len(self.data["frame"])
         self.data["frame"].append(frame)
         # Copies: on a CPU device .cpu().numpy() shares memory with simulation buffers that are updated in place.
         self.data["root_pos"].append((self.robot.data.root_link_pos_w[0] - self.origin).cpu().numpy().copy())

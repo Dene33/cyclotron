@@ -77,7 +77,14 @@ def main() -> None:
         import onnxruntime
     except ImportError:
         sys.exit("[ERROR] sim2sim needs MuJoCo and ONNX Runtime: uv pip install -e 'source/cyclotron[sim2sim]'")
-    from cyclotron.sim2sim import PolicyRun, parse_command_schedule, play, play_velocity
+    from cyclotron.sim2sim import (
+        FALL_GRAVITY_Z,
+        PolicyRun,
+        parse_command_schedule,
+        play,
+        play_velocity,
+        projected_gravity_z,
+    )
 
     run_dir = Path(args.run_dir).expanduser()
     onnx_path = Path(args.onnx).expanduser() if args.onnx else default_onnx(run_dir)
@@ -119,6 +126,9 @@ def main() -> None:
             f"[INFO] After the first command: pelvis rose {100 * (pos[start:, 2].max() - pos[start, 2]):.1f} cm at"
             f" most, travelled {100 * travel[0]:+.1f} cm forward and {100 * travel[1]:+.1f} cm sideways"
         )
+        tilt = max(projected_gravity_z(quat) for quat in rollout["root_quat"])
+        print(f"[INFO] Highest pelvis tilt: projected gravity z {tilt:+.3f} (the firmware's fall trip is above"
+              f" {FALL_GRAVITY_Z})")
     if args.record:
         record = Path(args.record).expanduser()
         record.parent.mkdir(parents=True, exist_ok=True)

@@ -171,6 +171,100 @@ def tracking_model_card(
     )
 
 
+JUMP_CARD = """\
+---
+library_name: asimov
+pipeline_tag: robotics
+license: bsd-3-clause
+tags:
+- jump
+---
+
+# {title}
+
+{summary}
+
+A forward jump on command for Asimov 1, with the walking policy's interface: it runs where the walking policy runs.
+
+## Interface
+
+`policy.onnx` has the deployment contract of the walking policy it was trained against ({walking}): the same entries
+in its ONNX metadata for the observations, joint order, action scales, offsets and clips, PD gains and 50 Hz rate. A
+runtime that runs that walking policy runs this one with the same settings:
+
+- 78 observations: the pelvis angular velocity x 0.25, gravity's direction, the velocity command (forward speed,
+  sideways speed, yaw rate), the joint positions relative to the default pose and the joint velocities x 0.1 in the
+  motor-slot order, and the previous action.
+- 23 joint position targets: the default pose plus the action times its scale (0.08 for the ankle rolls, 0.25 for
+  the other joints), with the ankle rolls clipped to 0.09 rad either way.
+
+The velocity command is the trigger:
+
+- Zero: the robot stands and balances.
+- A forward speed of {speed:g} m/s (it was trained with {speed_low:g} to {speed_high:g}), held for the whole jump,
+  about {hold:.1f} s, then released: one forward jump. The robot lands about {landing:.1f} s after the command starts.
+  Held on after that, it jumps again.
+
+It doesn't walk: hand over to the walking policy once it stands.
+
+## Files
+
+- `policy.onnx`: the policy, from `obs` (1, 78) to `actions` (1, 23), with its observation normalisation and the
+  deployment contract in its metadata.
+- `env.yaml` and `agent.yaml`: the training task and PPO settings, including the observation recipe, joint order,
+  default pose, PD gains and effort limits.
+{extra_files}
+## How it was trained
+
+`Asimov1-Jump-v0` in the training code, with PPO in Isaac Lab: the motion tracking rewards of `Asimov1-Tracking-v0`
+on `{motion}`, but the policy never sees the reference motion. It only shapes the rewards and what the critic sees, so
+the policy doesn't need it to run. The ankle targets are clamped in training as Asimov 1's firmware clamps them
+(0.35 rad pitch, 0.1 rad roll).
+{motion_source}
+## Status
+
+{checkpoint}Trained in simulation only. Before a robot, play it in MuJoCo (`./cyclotron.sh --sim2sim`), then on the
+robot with `./cyclotron.sh --sim2real`, hanging from its gantry hook.
+
+Training and evaluation code: [{code_name}]({code_url}).
+"""
+
+
+def jump_model_card(
+    title: str,
+    summary: str,
+    walking: str,
+    motion: str,
+    speed: float,
+    speed_range: tuple[float, float],
+    hold_s: float,
+    landing_s: float,
+    code_url: str,
+    checkpoint: str | None = None,
+    motion_source: str | None = None,
+    extra_files: str = "",
+) -> str:
+    """Model card (README.md) for a shared jump policy (``Asimov1-Jump``). ``speed`` is the forward speed to tell it
+    to jump with, ``speed_range`` the speeds it was trained with, ``hold_s`` how long the command is held and
+    ``landing_s`` when it lands, from the command's start."""
+    return JUMP_CARD.format(
+        title=title,
+        summary=summary,
+        walking=walking,
+        motion=motion,
+        speed=speed,
+        speed_low=speed_range[0],
+        speed_high=speed_range[1],
+        hold=hold_s,
+        landing=landing_s,
+        code_url=code_url,
+        code_name=link_text(code_url),
+        checkpoint=f"Checkpoint `{checkpoint}`. " if checkpoint else "",
+        motion_source=f"\nReference motion: {motion_source}\n" if motion_source else "",
+        extra_files=extra_files,
+    )
+
+
 def rehash_uploaded_run_configs(code_state: str, recorded: dict[str, str], uploaded: dict[str, str]) -> str:
     """Point a run's ``code_state.yaml`` text at the copies of ``env.yaml`` and ``agent.yaml`` being uploaded, which
     have local paths stripped: each sha256 training recorded (``recorded``) becomes that of the uploaded text."""

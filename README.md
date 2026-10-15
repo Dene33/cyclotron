@@ -325,6 +325,36 @@ the pelvis IMU orientation relative to the reference pelvis and its angular velo
 and its previous action. To run it on the robot, the controller steps through the motion file at 50 Hz alongside the
 policy. `--view` currently supports the velocity policies only.
 
+## Jump on command, with the walking policy's interface
+
+A tracking policy needs its reference motion at run time. `Asimov1-Jump-v0` learns the same jump from the same
+reference, with the same rewards, but the policy never sees the reference: it observes and acts exactly as the walking
+policy does (`Asimov1-Velocity-v0`), with the same 78 observations, actions, robot and actuators. So it has the
+walking policy's deployment contract and runs wherever the walking policy runs. Its velocity command is the trigger:
+
+- zero, it stands and balances;
+- a forward speed (0.3 m/s; trained with 0.25 to 0.4) held for the whole jump, about 2.2 s, then released, it jumps
+  forward once and lands about 1.4 s after the command starts; held on after that, it jumps again.
+
+During training each robot cycles through standing (the reference's first jump frame, 0.5 s into the motion, standing
+still under the robot), the jump (the reference from there, from where the robot stood when told to jump) and holding
+its landing. The reference only shapes the rewards and the critic. The simulated ankles clamp their targets as Asimov
+1's firmware does (0.35 rad pitch, 0.1 rad roll), so the policy can't rely on pushing past them.
+
+```bash
+./cyclotron.sh --train --task Asimov1-Jump-v0 --motion_file motions/forward_jump.npz --num_envs 4096 --headless
+./cyclotron.sh --play --task Asimov1-Jump-Play-v0 --num_envs 1 --headless --load_run <run> --record rollouts/jump.npz
+./cyclotron.sh --export --checkpoint logs/rsl_rl/asimov1_jump/<run>/model_<n>.pt
+./cyclotron.sh --compare-contract logs/rsl_rl/asimov1_jump/<run>/exported/policy.onnx Menlo/asimov1-locomotion-26-09-24
+./cyclotron.sh --sim2sim logs/rsl_rl/asimov1_jump/<run> --command 0:1.5,0.3:2.0,0:2.5
+```
+
+Play stands for 1.5 s, jumps once and holds the landing for 3 s; `--record` records that cycle. `--compare-contract`
+checks that two exported policies have the same deployment contract (the ONNX metadata a runtime checks: observations,
+joint order, action scales, offsets and clips, PD gains and rate) and lists every difference. `--share` publishes a jump
+with its own model card, without the reference motion, and only if its contract is the walking policy's
+(`--walking-repo`, default `Menlo/asimov1-locomotion-26-09-24`).
+
 ## Compare policies side by side
 
 Render a reference motion and several trained policies next to each other, with an orthographic camera at 45°, to a

@@ -84,6 +84,19 @@ class JumpCommand(MotionCommand):
             f" {self.motion.num_frames - 1}; " + super().__str__()
         )
 
+    @property
+    def shown_frames(self) -> torch.Tensor:
+        """The motion's frame the reference shows: its first jump frame while standing, its last while holding."""
+        frames = self.time_steps.clone()
+        frames[frames == self.stand_frame] = self.start_frame
+        frames[frames == self.hold_frame] = self.motion.num_frames - 1
+        return frames
+
+    @property
+    def cycle_steps(self) -> int:
+        """Steps of one cycle at the longest: standing, the jump, holding the landing."""
+        return round((self.cfg.stand_time_s[1] + self.cfg.hold_time_s[1]) / self.step_dt) + self.jump_frames
+
     def _append_still_frames(self, frames: list[int]):
         """Append copies of ``frames`` with no motion: zero velocities, all sole points as they are."""
         ids = torch.tensor(frames, device=self.device)

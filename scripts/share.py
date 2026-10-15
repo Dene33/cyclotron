@@ -25,11 +25,14 @@ import sys
 import tempfile
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from cyclotron.code_state import edited_run_configs, hash_run_configs
+from cyclotron.deploy_contract import contract_differences, read_contract
 from cyclotron.hub import (
     checkpoints,
     infer_task,
+    jump_model_card,
     link_text,
     rehash_uploaded_run_configs,
     strip_local_paths,
@@ -73,6 +76,15 @@ DEFAULT_SUMMARY = (
 DEFAULT_TRACKING_SUMMARY = (
     "Motion tracking policy for Asimov 1, trained in Isaac Lab with PPO to follow a retargeted human motion."
 )
+DEFAULT_JUMP_TITLE = "Asimov 1 forward jump"
+DEFAULT_JUMP_SUMMARY = (
+    "A forward jump for Asimov 1 on the walking policy's velocity command, trained in Isaac Lab with PPO from a"
+    " retargeted human jump."
+)
+# The forward speed to tell a jump to jump with, as --sim2sim and --sim2real do.
+JUMP_COMMAND_SPEED = 0.3
+# The walking policy a jump must have the deployment contract of.
+DEFAULT_WALKING_REPO = "Menlo/asimov1-locomotion-26-09-24"
 
 EXPORT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rsl_rl", "export.py")
 
@@ -95,6 +107,13 @@ parser.add_argument(
     dest="motion_source",
     default=None,
     help="Motion tracking runs: where the reference motion comes from, with any credit its licence asks for.",
+)
+parser.add_argument(
+    "--walking-repo",
+    "--walking_repo",
+    dest="walking_repo",
+    default=DEFAULT_WALKING_REPO,
+    help="Jump runs: the walking policy's Hub repo, whose deployment contract the jump must have to be uploaded.",
 )
 parser.add_argument(
     "--onnx",
@@ -156,6 +175,24 @@ def export_policy(checkpoint: str, task: str, output_dir: str) -> None:
         sys.exit(f"[ERROR] The export finished without writing {' and '.join(missing)}.")
 
 
+def jump_timing(motion_cfg: dict, step_dt: float) -> tuple[float, float]:
+    """How long a jump's command is held (from the jump's start in the motion to the motion's end) and when the
+    reference lands (its last touchdown), in seconds from the command's start, as the jump command plays it."""
+    motion = np.load(motion_cfg["motion_file"])
+    names = [str(name) for name in motion["body_names"]]
+    feet = [names.index(name) for name in motion_cfg["foot_body_names"]]
+    pos, quat = motion["body_pos_w"][:, feet], motion["body_quat_w"][:, feet]
+    rotations = Rotation.from_quat(quat.reshape(-1, 4)[:, [1, 2, 3, 0]])
+    heights = [
+        rotations.apply(point)[:, 2].reshape(pos.shape[:2]) + pos[..., 2] for point in motion_cfg["foot_sole_points"]
+    ]
+    touching = (np.stack(heights) < motion_cfg["contact_height"]).any(axis=(0, 2))
+    landings = np.where(~touching[:-1] & touching[1:])[0] + 1
+    start = int(round(motion_cfg["jump_start_s"] / step_dt))
+    landing = int(landings[-1]) if len(landings) else len(touching) - 1
+    return (len(touching) - start) * step_dt, (landing - start) * step_dt
+
+
 def stale_files(repo_files: list[str], uploaded: list[str]) -> list[str]:
     """The files an earlier share put in the repo that this one doesn't upload, e.g. a code_state.yaml or policy.pt
     that would otherwise be published next to a policy they don't belong to, or another run's reference motion."""
@@ -206,9 +243,30 @@ def main() -> None:
         except ValueError as error:
             sys.exit(f"[ERROR] {error}")
 
-    policy_cfg = (load_env_yaml(files["env.yaml"]).get("observations") or {}).get("policy") or {}
+    env_cfg = load_env_yaml(files["env.yaml"])
+    policy_cfg = (env_cfg.get("observations") or {}).get("policy") or {}
+    motion_cfg = (env_cfg.get("commands") or {}).get("motion") or {}
+    is_jump = str(motion_cfg.get("class_type", "")).endswith(":JumpCommand")
     extra_files = (POLICY_PT_LINE if needs_export else "") + (CODE_STATE_LINE if "code_state.yaml" in files else "")
-    if [name for name, term in policy_cfg.items() if isinstance(term, dict)] == TRACKING_OBSERVATIONS:
+    if is_jump:
+        # The jump learned from its reference motion but doesn't read it: the motion stays out of the repo.
+        run = PolicyRun.load(run_dir)
+        hold_s, landing_s = jump_timing(motion_cfg, run.policy_dt)
+        readme = jump_model_card(
+            title=args_cli.title or DEFAULT_JUMP_TITLE,
+            summary=args_cli.summary or DEFAULT_JUMP_SUMMARY,
+            walking=f"[{args_cli.walking_repo}](https://huggingface.co/{args_cli.walking_repo})",
+            motion=os.path.basename(motion_cfg["motion_file"]),
+            speed=JUMP_COMMAND_SPEED,
+            speed_range=tuple(motion_cfg["trigger_speed"]),
+            hold_s=hold_s,
+            landing_s=landing_s,
+            code_url=args_cli.code_url,
+            checkpoint=os.path.basename(checkpoint) if needs_export else None,
+            motion_source=args_cli.motion_source,
+            extra_files=extra_files,
+        )
+    elif [name for name, term in policy_cfg.items() if isinstance(term, dict)] == TRACKING_OBSERVATIONS:
         # A tracking policy reads its reference motion at run time, so the motion goes with it, under the file name
         # the shared env.yaml refers to.
         run = PolicyRun.load(run_dir)
@@ -281,6 +339,18 @@ def main() -> None:
             export_policy(checkpoint, task, export_dir)
             files["policy.onnx"] = os.path.join(export_dir, "policy.onnx")
             files["policy.pt"] = os.path.join(export_dir, "policy.pt")
+        if is_jump:
+            # A jump runs where the walking policy runs only with the same deployment contract.
+            from huggingface_hub import hf_hub_download
+
+            walking = read_contract(hf_hub_download(args_cli.walking_repo, "policy.onnx"))
+            differences = contract_differences(read_contract(files["policy.onnx"]), walking)
+            if differences:
+                sys.exit(
+                    f"[ERROR] The jump's deployment contract differs from {args_cli.walking_repo}'s:\n  "
+                    + "\n  ".join(differences)
+                )
+            print(f"[INFO] Same deployment contract as {args_cli.walking_repo}.")
 
         repo_url = api.create_repo(args_cli.repo_id, repo_type="model", private=args_cli.private, exist_ok=True)
         operations = [
