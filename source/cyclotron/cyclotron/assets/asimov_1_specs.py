@@ -38,3 +38,10 @@ ASIMOV_1_MAX_SPEED = {
     "elbow_wrist": 9.32,
 }
 """Maximum speed (rad/s), the same as the URDF's velocity limits."""
+
+ASIMOV_1_FIRMWARE_TARGET_LIMITS = {
+    "ankle_pitch": 0.35,
+    "ankle_roll": 0.1,
+}
+"""Largest position target (rad, either way) the firmware drives, by actuator group: it clamps the ankle targets it is
+sent to these, from menlo-sdk's ``menlo.asimov.robots`` (the firmware's ``policy_thread.c``, ``apply_ankle_coupling``)."""

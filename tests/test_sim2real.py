@@ -13,13 +13,14 @@ from cyclotron.sim2real import (
     NECK_STIFFNESS,
     JointMap,
     TrackingController,
+    VelocityController,
     ankle_from_motors,
     heading,
     load_joint_limits,
     motors_from_ankle,
     turn_to_heading,
 )
-from cyclotron.sim2sim import TrackingRun, anchor_orientation_6d
+from cyclotron.sim2sim import PolicyRun, anchor_orientation_6d
 
 URDF = Path(__file__).resolve().parents[1] / "third_party" / "asimov-1" / "sim-model" / "urdf" / "asimov_1.urdf"
 JOINTS = list(MODEL_JOINTS.values())
@@ -63,6 +64,25 @@ def test_joint_map_follows_the_policys_joint_order():
 def test_joint_map_rejects_unknown_joints():
     with pytest.raises(ValueError, match="neck_pitch_joint"):
         JointMap(["neck_pitch_joint"])
+
+
+def test_ankle_gains_are_motor_gains():
+    # Menlo's ankle model: the joint gains are the motors' times K^2 / 2, so the firmware's 110 / 5 per motor are
+    # 224.42 / 10.201 at the pitch and 35.2 / 1.6 at the roll.
+    joint_map = JointMap(JOINTS)
+    stiffness, damping = np.full(len(JOINTS), 150.0), np.full(len(JOINTS), 5.0)
+    for joint, kp, kd in (("ankle_pitch", 224.42, 10.201), ("ankle_roll", 35.2, 1.6)):
+        for side in ("left", "right"):
+            stiffness[JOINTS.index(f"{side}_{joint}_joint")], damping[JOINTS.index(f"{side}_{joint}_joint")] = kp, kd
+    kp, kd = joint_map.gains(stiffness, damping)
+
+    for motor in ("L_Ankle_A", "L_Ankle_B", "R_Ankle_A", "R_Ankle_B"):
+        assert kp[FIRMWARE_JOINTS.index(motor)] == pytest.approx(110.0, rel=1e-4)  # Menlo rounded 224.422
+        assert kd[FIRMWARE_JOINTS.index(motor)] == pytest.approx(5.0)
+    assert kp[FIRMWARE_JOINTS.index("L_Knee")] == 150.0
+    back = joint_map.joint_gains(kp, kd)
+    np.testing.assert_allclose(back[0], stiffness)
+    np.testing.assert_allclose(back[1], damping)
 
 
 def test_gains_cover_every_motor():
@@ -112,7 +132,7 @@ def test_turn_to_heading_keeps_tilt_and_relative_turns():
 
 
 @pytest.fixture
-def run(tmp_path) -> TrackingRun:
+def run(tmp_path) -> PolicyRun:
     frames = 5
     rng = np.random.default_rng(1)
     pelvis_quat = np.array([quat_wxyz(Rotation.from_euler("z", 0.5 + 0.01 * i)) for i in range(frames)])
@@ -126,16 +146,20 @@ def run(tmp_path) -> TrackingRun:
         body_quat_w=pelvis_quat[:, None, :],
     )
     n = len(JOINTS)
-    return TrackingRun(
+    return PolicyRun(
         joint_names=JOINTS,
         default_joint_pos=np.full(n, 0.05),
         stiffness=np.full(n, 100.0),
         damping=np.full(n, 5.0),
         effort_limit=np.full(n, 40.0),
         actuator_groups=["joint"] * n,
-        action_scale=0.25,
+        action_scale=np.full(n, 0.25),
+        action_clip=np.tile([-np.inf, np.inf], (n, 1)),
         physics_dt=0.005,
         decimation=4,
+        root_height=0.639,
+        interface="tracking",
+        observations=[],
         motion_file=str(tmp_path / "motion.npz"),
     )
 
@@ -162,6 +186,37 @@ def test_tracking_controller_builds_the_training_observation(run):
 
     second = controller.step(robot_quat, np.zeros(3), np.zeros(n), np.zeros(n))
     np.testing.assert_allclose(second.observation[4 * n + 9 :], 1.0)  # the last action
+
+
+def test_velocity_controller_steps_the_recipe_and_clips_the_targets(run):
+    from cyclotron.sim2sim import ObservationTerm
+
+    run.interface = "velocity"
+    run.observations = [
+        ObservationTerm("base_ang_vel", "base_ang_vel", 0.25),
+        ObservationTerm("projected_gravity", "projected_gravity"),
+        ObservationTerm("command", "command"),
+        ObservationTerm("joint_vel_slot", "joint_vel", 0.1, [1, 0]),
+        ObservationTerm("actions", "actions"),
+    ]
+    run.action_clip[0] = (-0.1, 0.1)
+    seen = []
+    controller = VelocityController(
+        run, lambda obs: seen.append(obs) or np.ones(len(JOINTS)), (np.full(23, -1.0), np.full(23, 0.2))
+    )
+    n = len(JOINTS)
+    joint_vel = np.arange(n, dtype=float)
+    first = controller.step(np.array([0, 0, -1.0]), np.array([4.0, 0, 0]), np.zeros(n), joint_vel, np.array([0.3, 0, 0]))
+
+    np.testing.assert_allclose(seen[0][:11], [1, 0, 0, 0, 0, -1, 0.3, 0, 0, 0.1, 0.0], atol=1e-6)
+    np.testing.assert_allclose(seen[0][11:], 0.0)  # no action yet
+    # 0.05 + 0.25 is clipped by the run to 0.1 for the first joint, by the joint limits to 0.2 for the others.
+    assert first.target[0] == pytest.approx(0.1) and np.allclose(first.target[1:], 0.2)
+    second = controller.step(np.array([0, 0, -1.0]), np.zeros(3), np.zeros(n), joint_vel, np.zeros(3))
+    np.testing.assert_allclose(second.observation[11:], 1.0)  # the last action
+    with pytest.raises(ValueError):
+        run.interface = "tracking"
+        VelocityController(run, lambda obs: obs, (np.full(23, -1.0), np.full(23, 1.0)))
 
 
 def test_tracking_controller_plays_once_then_holds_the_last_frame(run):

@@ -1,15 +1,18 @@
-"""Play a motion tracking policy on the real Asimov 1 (sim2real), through Menlo's Python SDK (menlo-sdk).
+"""Play a policy on the real Asimov 1 (sim2real), through Menlo's Python SDK (menlo-sdk).
 
-Three commands, from the safest:
+A motion tracking policy (``Asimov1-Tracking``), or one with the walking policy's interface (``Asimov1-Jump``, or the
+walking policy itself), read from the run's env.yaml. Three commands, from the safest:
 
 - ``check``: read the robot's state for a few seconds; report the state rate, the IMU and every joint in the policy's
   frame, and flag joints outside the URDF's limits (a sign or ankle conversion error). Sends nothing.
 - ``dry-run``: run the policy at the policy rate on the live state, as ``run`` does, but send nothing. Measures the
   loop's timing and shows the targets the policy would send.
-- ``run``: stream the policy's joint targets: first tracking the reference's first frame, standing still, for
-  ``--settle`` seconds (the policy balances the robot from STAND into the motion's starting pose), then the motion,
-  then its last frame for ``--hold`` seconds; then DAMP (or hand back to the walking policy with ``--end balance``).
-  The robot must hang from its gantry hook with both feet on the floor, in STAND and armed.
+- ``run``: stream the policy's joint targets, then DAMP (or hand back to the walking policy with ``--end balance``). A
+  tracking policy first tracks the reference's first frame, standing still, for ``--settle`` seconds (the policy
+  balances the robot from STAND into the motion's starting pose), then the motion, then its last frame for ``--hold``
+  seconds. A velocity-interface policy follows ``--command``: velocity commands and how long each is held (for the
+  jump: stand, the jump command held through the jump, stand). The robot must hang from its gantry hook with both
+  feet on the floor, in STAND and armed.
 
 ``dry-run`` and ``run`` record every step to ``<run>/sim2real/<command>_<time>.npz``.
 
@@ -68,23 +71,42 @@ for name, help_text in (
     ("run", "Play the policy on the robot. It must hang from its gantry hook, feet on the floor, in STAND."),
 ):
     command = commands.add_parser(name, help=help_text)
-    command.add_argument("run_dir", type=str, help="Training run, e.g. logs/rsl_rl/asimov1_tracking/<run>.")
     command.add_argument(
-        "--onnx", type=str, default=None, help="Policy to play. Default: <run_dir>/exported/policy.onnx."
+        "run_dir", type=str, help="Training run, e.g. logs/rsl_rl/asimov1_jump/<run>, or a shared policy's folder."
+    )
+    command.add_argument(
+        "--onnx",
+        type=str,
+        default=None,
+        help="Policy to play. Default: <run_dir>/exported/policy.onnx, or <run_dir>/policy.onnx.",
     )
     command.add_argument("--urdf", type=str, default=str(DEFAULT_URDF), help="URDF with the joint limits.")
     command.add_argument(
-        "--settle", type=float, default=1.0, help="Seconds tracking the first frame, standing still, before the motion."
+        "--command",
+        dest="schedule",
+        type=str,
+        default=None,
+        help="Velocity-interface policies: commands and seconds, e.g. '0:1.5,0.3:2,0:2.5' (vx, or vx/vy/yaw_rate).\n"
+        "Default: stand, jump, stand for a run with a reference motion (the jump), else stand, walk, stand.",
     )
-    command.add_argument("--hold", type=float, default=1.0, help="Seconds to keep tracking the reference's last frame.")
+    command.add_argument(
+        "--settle",
+        type=float,
+        default=1.0,
+        help="Tracking policies: seconds tracking the first frame, standing still, before the motion.",
+    )
+    command.add_argument(
+        "--hold", type=float, default=1.0, help="Tracking policies: seconds to keep tracking the reference's last frame."
+    )
     command.add_argument("--record", type=str, default=None, help="Where to save the log (.npz).")
     if name == "run":
         command.add_argument(
             "--blend",
             type=float,
             default=0.0,
-            help="Seconds to blend the joints to the first frame's pose before the policy starts (0: off). The\n"
-            "blend only holds joint positions, without balance: the robot tips over unless the gantry holds it.",
+            help="Tracking policies: seconds to blend the joints to the first frame's pose before the policy starts\n"
+            "(0: off). The blend only holds joint positions, without balance: the robot tips over unless the gantry\n"
+            "holds it.",
         )
         command.add_argument(
             "--end",
@@ -303,8 +325,8 @@ def stop_reason(state, sending: bool, step: int) -> str | None:
         return "the robot faulted: " + (", ".join(a.name for a in state.alerts) or f"error flags {state.error_flags:#x}")
     if state.age_s > MAX_STATE_AGE_S:
         return f"the state is {state.age_s * 1e3:.0f} ms old"
-    if state.quat is None or state.gyro is None:
-        return "the robot did not report its orientation and angular velocity"
+    if state.quat is None or state.gyro is None or state.gravity is None:
+        return "the robot did not report its orientation, gravity's direction and its angular velocity"
     if any(j.vel is None for j in state.joints):
         return "the robot did not report every joint velocity"
     # The first setpoint takes an armed STAND to MOVE; give the report a few steps to arrive.
@@ -314,14 +336,32 @@ def stop_reason(state, sending: bool, step: int) -> str | None:
 
 
 def play(
-    robot, controller, joint_map, kp, kd, *, send: bool, settle_s: float, hold_s: float, log: Log, stop: threading.Event
+    robot,
+    controller,
+    joint_map,
+    kp,
+    kd,
+    *,
+    send: bool,
+    settle_s: float,
+    hold_s: float,
+    commands: np.ndarray | None,
+    log: Log,
+    stop: threading.Event,
 ) -> str:
-    """Step the policy at its rate on the freshest state, sending its targets if ``send``. Returns why it ended."""
+    """Step the policy at its rate on the freshest state, sending its targets if ``send``. A tracking policy settles,
+    plays its motion and holds; a velocity-interface policy follows ``commands`` (one per step). Returns why it
+    ended."""
     state = robot.get_state()
     neck = [state.joint_pos[i] for i in joint_map.neck_index]
-    settle_steps = round(settle_s / controller.dt)
-    controller.start(np.asarray(state.quat), settle_steps)
-    steps = settle_steps + controller.frames - 1 + round(hold_s / controller.dt)
+    tracking = commands is None
+    if tracking:
+        settle_steps = round(settle_s / controller.dt)
+        controller.start(np.asarray(state.quat), settle_steps)
+        steps = settle_steps + controller.frames - 1 + round(hold_s / controller.dt)
+    else:
+        controller.start()
+        steps = len(commands)
     start = time.perf_counter()
     tick = start
     for step in range(steps):
@@ -336,7 +376,12 @@ def play(
             return reason
         joint_pos = joint_map.to_joints(state.joint_pos)
         joint_vel = joint_map.to_joints([j.vel for j in state.joints])
-        result = controller.step(np.asarray(state.quat), np.asarray(state.gyro), joint_pos, joint_vel)
+        if tracking:
+            command = np.zeros(3)
+            result = controller.step(np.asarray(state.quat), np.asarray(state.gyro), joint_pos, joint_vel)
+        else:
+            command = commands[step]
+            result = controller.step(np.asarray(state.gravity), np.asarray(state.gyro), joint_pos, joint_vel, command)
         motor_target = joint_map.to_motors(result.target, neck)
         if send:
             robot.trajectory(motor_target, kp=kp, kd=kd)
@@ -351,7 +396,8 @@ def play(
             mode=int(state.mode),
             quat=state.quat,
             gyro=state.gyro,
-            gravity=state.gravity if state.gravity is not None else (np.nan,) * 3,
+            gravity=state.gravity,
+            velocity_command=command,
             motor_pos=state.joint_pos,
             motor_vel=[j.vel for j in state.joints],
             motor_current=[j.current if j.current is not None else np.nan for j in state.joints],
@@ -395,19 +441,54 @@ def summarize(log: Log, joint_names: list[str], reason: str) -> None:
 def play_command(args) -> None:
     from menlo.asimov import MenloError, Mode
 
-    from cyclotron.sim2real import FIRMWARE_JOINTS, JointMap, TrackingController, load_joint_limits
-    from cyclotron.sim2sim import TrackingRun
+    from cyclotron.sim2real import (
+        EDGE_KD_RANGE,
+        EDGE_KP_RANGE,
+        FIRMWARE_JOINTS,
+        JointMap,
+        TrackingController,
+        VelocityController,
+        load_joint_limits,
+    )
+    from cyclotron.sim2sim import (
+        DEFAULT_JUMP_COMMANDS,
+        DEFAULT_WALK_COMMANDS,
+        PolicyRun,
+        parse_command_schedule,
+        schedule_commands,
+    )
 
     sending = args.command == "run"
     run_dir = Path(args.run_dir).expanduser()
-    onnx_path = Path(args.onnx).expanduser() if args.onnx else run_dir / "exported" / "policy.onnx"
+    onnx_path = Path(args.onnx).expanduser() if args.onnx else next(
+        (path for path in (run_dir / "exported" / "policy.onnx", run_dir / "policy.onnx") if path.is_file()),
+        run_dir / "exported" / "policy.onnx",
+    )
     if not onnx_path.is_file():
         sys.exit(f"[ERROR] No policy at {onnx_path}. Export one with ./cyclotron.sh --export --checkpoint"
                  f" {run_dir}/model_<N>.pt")
-    run = TrackingRun.load(run_dir)
+    run = PolicyRun.load(run_dir)
     joint_map = JointMap(run.joint_names)
-    controller = TrackingController(run, load_policy(onnx_path), load_joint_limits(args.urdf, run.joint_names))
+    limits = load_joint_limits(args.urdf, run.joint_names)
+    schedule, commands = None, None
+    if run.interface == "tracking":
+        controller = TrackingController(run, load_policy(onnx_path), limits)
+        what = (f"reference {Path(run.motion_file).name}, {controller.frames} frames at {1 / controller.dt:g} Hz"
+                f" ({(controller.frames - 1) * controller.dt:.2f} s)")
+    else:
+        controller = VelocityController(run, load_policy(onnx_path), limits)
+        schedule = args.schedule or (DEFAULT_JUMP_COMMANDS if run.motion_file else DEFAULT_WALK_COMMANDS)
+        commands = schedule_commands(parse_command_schedule(schedule), controller.dt)
+        what = f"velocity commands {schedule} ({len(commands) * controller.dt:.2f} s)"
     kp, kd = joint_map.gains(run.stiffness, run.damping)
+    clipped_kp, clipped_kd = np.clip(kp, *EDGE_KP_RANGE), np.clip(kd, *EDGE_KD_RANGE)
+    outside = [i for i in range(len(kp)) if clipped_kp[i] != kp[i] or clipped_kd[i] != kd[i]]
+    if outside:
+        print("[WARN] Asimov Edge takes kp in [0, 500] and kd in [0, 5], so these motor gains are clipped: "
+              + ", ".join(f"{FIRMWARE_JOINTS[i]} kp {kp[i]:.1f} kd {kd[i]:.2f}" for i in outside)
+              + ". The policy was trained with an ankle model the firmware can't reproduce: retrain it with"
+              " the current ASIMOV_1_ACTUATORS.")
+    kp, kd = clipped_kp.tolist(), clipped_kd.tolist()
     record = Path(args.record).expanduser() if args.record else (
         run_dir / "sim2real" / f"{args.command}_{datetime.now():%Y-%m-%d_%H-%M-%S}.npz"
     )
@@ -424,8 +505,7 @@ def play_command(args) -> None:
             time.sleep(0.05)
             state = robot.get_state()
         print(f"[INFO] Robot: {describe(state, robot)}")
-        print(f"[INFO] Policy: {onnx_path}; reference {Path(run.motion_file).name}, {controller.frames} frames at"
-              f" {1 / controller.dt:g} Hz ({(controller.frames - 1) * controller.dt:.2f} s)")
+        print(f"[INFO] Policy: {onnx_path} ({run.interface} interface); {what}")
         if sending:
             hottest = max((j.temp for j in state.joints if j.temp is not None), default=None)
             problems = []
@@ -444,17 +524,20 @@ def play_command(args) -> None:
                                 " from its gantry hook with both feet on the floor")
             if problems:
                 sys.exit("[ERROR] Not starting: " + "; ".join(problems) + ".")
-            plan = f"blend the joints to the first frame's pose over {args.blend:g} s, " if args.blend > 0 else ""
-            print(f"[INFO] Plan: {plan}track the first frame for {args.settle:g} s, play the motion, hold its last"
-                  f" frame for {args.hold:g} s, then"
-                  f" {'DAMP' if args.end == 'damp' else 'hand back to the walking policy (balance)'}.")
+            end = "DAMP" if args.end == "damp" else "hand back to the walking policy (balance)"
+            if run.interface == "tracking":
+                plan = f"blend the joints to the first frame's pose over {args.blend:g} s, " if args.blend > 0 else ""
+                print(f"[INFO] Plan: {plan}track the first frame for {args.settle:g} s, play the motion, hold its"
+                      f" last frame for {args.hold:g} s, then {end}.")
+            else:
+                print(f"[INFO] Plan: follow the velocity commands {schedule}, then {end}.")
             if not args.yes:
                 print("[WARN] The robot must hang from its gantry hook with both feet on the floor. Keep the E-Stop"
                       " in Asimov Manager at hand. Ctrl+C DAMPs the robot.")
                 if input("Type 'go' to start: ").strip() != "go":
                     sys.exit("[INFO] Not started.")
 
-            if args.blend > 0:
+            if args.blend > 0 and run.interface == "tracking":
                 neck = [state.joint_pos[i] for i in joint_map.neck_index]
                 first = joint_map.to_motors(controller.first_pose(), neck)
                 try:
@@ -483,6 +566,7 @@ def play_command(args) -> None:
                 send=sending,
                 settle_s=args.settle,
                 hold_s=args.hold,
+                commands=commands,
                 log=log,
                 stop=stop,
             )
@@ -509,7 +593,9 @@ def play_command(args) -> None:
                 kd=kd,
                 run_dir=str(run_dir),
                 onnx=str(onnx_path),
-                motion_file=run.motion_file,
+                motion_file=run.motion_file or "",
+                interface=run.interface,
+                schedule=schedule or "",
                 command=args.command,
                 reason=reason,
                 dt=controller.dt,

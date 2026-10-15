@@ -366,7 +366,8 @@ the maximum speeds, so `1` is the weakest motor. `--save results.npz` also write
 positions, speeds and torques of the first 16 robots (`--save_robots`) at every physics step.
 
 **MuJoCo (sim2sim).** `--sim2sim` plays the exported policy on Asimov 1's published MJCF, with the gains, effort
-limits and timing from the run's `env.yaml`. It needs MuJoCo and ONNX Runtime
+limits, action processing, timing and observations from the run's `env.yaml`, and the ankle targets clamped as the
+firmware does (`--no_firmware_clamp` turns that off). It needs MuJoCo and ONNX Runtime
 (`uv pip install -e "source/cyclotron[sim2sim]"`).
 
 ```bash
@@ -374,12 +375,17 @@ limits and timing from the run's `env.yaml`. It needs MuJoCo and ONNX Runtime
 ./cyclotron.sh --sim2sim logs/rsl_rl/asimov1_tracking/<run> --record rollouts/mujoco.npz
 ```
 
-It prints whether the robot falls (training's pelvis height and tilt limits) and, with `--record`, saves the rollout
-for `--render`. `--delay`, `--motor_speed_ratio` and `--foot_friction` make it harder.
+A tracking policy plays its motion from the first frame, and `--sim2sim` prints whether the robot falls (training's
+pelvis height and tilt limits). A policy with the walking policy's interface (the jump, or the walking policy itself,
+also from a shared policy's folder) starts standing and follows `--command`: velocity commands and how long each is
+held, e.g. `0:1.5,0.3:2,0:2.5` (stand, jump, stand). It prints whether the robot falls (the firmware's fall trip), and
+how high the pelvis rose and how far the robot travelled. `--record` saves the rollout for `--render`. `--delay`,
+`--motor_speed_ratio` and `--foot_friction` make it harder.
 
 **On the real robot (sim2real).** `--sim2real` plays the exported policy on Asimov 1 through
 [menlo-sdk](https://github.com/menloresearch/menlo-sdk): it reads the robot's state at 200 Hz over UDP, builds the
-policy's observation, and streams joint targets at 50 Hz with the run's PD gains. It runs in its own Python 3.12
+policy's observation (a tracking policy's, or the walking policy's interface, as the run's `env.yaml` records), and
+streams joint targets at 50 Hz with the run's PD gains. It runs in its own Python 3.12
 environment (uv); set `MENLO_SDK=/path/to/menlo-sdk` to use a local checkout of the SDK. Asimov Edge must run with
 `udp-control` on and send its state to this machine (`udp-state-host`).
 
@@ -391,12 +397,18 @@ environment (uv); set `MENLO_SDK=/path/to/menlo-sdk` to use a local checkout of 
 
 `check` reports the state rate, the IMU and every joint in the policy's frame, and flags joints outside the URDF's
 limits (a sign or ankle conversion error). `run` needs the robot hanging from its gantry hook with both feet on the
-floor, in STAND and armed. The policy first balances the robot from STAND into the motion's first frame (`--settle`,
-1 s), then plays the motion, holds its last frame (`--hold`, 1 s), and DAMPs; `--end balance` hands back to the walking
+floor, in STAND and armed. A tracking policy first balances the robot from STAND into the motion's first frame
+(`--settle`, 1 s), then plays the motion and holds its last frame (`--hold`, 1 s); a policy with the walking policy's
+interface follows `--command`, as in `--sim2sim`. Then the robot DAMPs; `--end balance` hands back to the walking
 policy instead, which menlo-sdk does not document after joint control. `dry-run` and `run` log every step to
-`<run>/sim2real/`. The firmware limits ankle targets to ±0.35 rad pitch and ±0.1 rad roll, so targets are clamped to
-the URDF's joint limits. Training does not clamp them, and a policy that pushes its ankles against their stops loses
-that push on the robot: the forward jump rises 8 cm instead of 14 cm in MuJoCo with clamped ankle targets.
+`<run>/sim2real/`.
+
+Two firmware details matter. It limits ankle targets to ±0.35 rad pitch and ±0.1 rad roll, so targets are clamped to
+the URDF's joint limits; a tracking policy trained without that clamp, which pushes its ankles against their stops,
+loses that push on the robot (the forward jump rises 8 cm instead of 14 cm in MuJoCo). `Asimov1-Jump` trains with
+the clamp. And it drives each ankle motor with its own gains: with Menlo's ankle model (`ASIMOV_1_ACTUATORS`), the
+joint's 224.42 / 10.201 (pitch) and 35.2 / 1.6 (roll) are the motors' 110 / 5, which `--sim2real` sends. A policy
+trained with the earlier ankle model needs motor gains the firmware doesn't accept, and they are clipped.
 
 `--mujoco-edge` stands in for the robot: Asimov 1 in MuJoCo behind Asimov Edge's UDP protocol, following the
 firmware's mode rules, so `--sim2real` can be tested end to end on one machine. `--viewer` shows the robot live in

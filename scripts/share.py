@@ -36,7 +36,7 @@ from cyclotron.hub import (
     tracking_model_card,
 )
 from cyclotron.run_config import generated_run_configs
-from cyclotron.sim2sim import TrackingRun, load_env_yaml
+from cyclotron.sim2sim import TRACKING_OBSERVATIONS, PolicyRun, load_env_yaml
 
 README_TEMPLATE = """---
 library_name: asimov
@@ -206,13 +206,12 @@ def main() -> None:
         except ValueError as error:
             sys.exit(f"[ERROR] {error}")
 
-    env_cfg = load_env_yaml(files["env.yaml"])
-    motion_cfg = (env_cfg.get("commands") or {}).get("motion")
+    policy_cfg = (load_env_yaml(files["env.yaml"]).get("observations") or {}).get("policy") or {}
     extra_files = (POLICY_PT_LINE if needs_export else "") + (CODE_STATE_LINE if "code_state.yaml" in files else "")
-    if isinstance(motion_cfg, dict) and motion_cfg.get("motion_file"):
+    if [name for name, term in policy_cfg.items() if isinstance(term, dict)] == TRACKING_OBSERVATIONS:
         # A tracking policy reads its reference motion at run time, so the motion goes with it, under the file name
         # the shared env.yaml refers to.
-        run = TrackingRun.load(run_dir)
+        run = PolicyRun.load(run_dir)
         if not os.path.isfile(run.motion_file):
             sys.exit(f"[ERROR] The run's reference motion is missing: {run.motion_file}")
         motion_name = os.path.basename(run.motion_file)
@@ -224,7 +223,7 @@ def main() -> None:
             motion=motion_name,
             duration=len(np.load(run.motion_file)["joint_pos"]) / fps,
             fps=fps,
-            action_scale=run.action_scale,
+            action_scale=float(run.action_scale[0]),
             code_url=args_cli.code_url,
             checkpoint=os.path.basename(checkpoint) if needs_export else None,
             motion_source=args_cli.motion_source,

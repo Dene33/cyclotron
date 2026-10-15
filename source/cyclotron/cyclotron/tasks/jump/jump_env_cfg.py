@@ -22,6 +22,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.utils import configclass
 
 from cyclotron.assets.actuators import TargetLimitedDelayedPDActuatorCfg
+from cyclotron.assets.asimov_1_specs import ASIMOV_1_FIRMWARE_TARGET_LIMITS
 from cyclotron.tasks.locomotion.velocity_env_cfg import ActionsCfg as VelocityActionsCfg
 from cyclotron.tasks.locomotion.velocity_env_cfg import ObservationsCfg as VelocityObservationsCfg
 from cyclotron.tasks.tracking.tracking_env_cfg import (
@@ -36,15 +37,11 @@ from cyclotron.tasks.tracking.tracking_env_cfg import ObservationsCfg as Trackin
 
 from . import mdp
 
-# Asimov 1's firmware clamps the ankle targets it is sent to these (rad), by actuator group: menlo-sdk's
-# menlo.asimov.robots, from the firmware's policy_thread.c (apply_ankle_coupling).
-FIRMWARE_TARGET_LIMITS = {"ankle_pitch": 0.35, "ankle_roll": 0.1}
-
 
 def firmware_limited(actuators: dict[str, ActuatorBaseCfg]) -> dict[str, ActuatorBaseCfg]:
     """``actuators`` with the groups the firmware clamps the targets of, clamping them too."""
     limited = dict(actuators)
-    for name, limit in FIRMWARE_TARGET_LIMITS.items():
+    for name, limit in ASIMOV_1_FIRMWARE_TARGET_LIMITS.items():
         actuator = actuators[name]
         values = {field.name: getattr(actuator, field.name) for field in dataclasses.fields(actuator)}
         values.pop("class_type")

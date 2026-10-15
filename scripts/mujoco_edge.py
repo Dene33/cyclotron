@@ -13,9 +13,10 @@ firmware's mode rules as menlo-sdk documents them (and its test suite's FakeEdge
 - A velocity in MOVE: there is no walking policy here, so the joints hold the standing pose, without balance.
 - A fall (projected gravity z above -0.5) or a joint past its limit latches DAMP, with error flags set, until restart.
 
-State reports the motors as the robot does, the ankles as their motors A and B. The robot can face any heading
-(``--yaw``) to test the reference's alignment, and commands and state can be delayed. The physics, gain table,
-standing pose and effort limits come from a training run's env.yaml, as in sim2sim. ``--record`` saves the robot's
+State reports the motors as the robot does, the ankles as their motors A and B, and a trajectory's ankle gains are
+motor gains, seen at the ankle joints through the linkage (``cyclotron.sim2real.ANKLE_GAIN_FACTORS``). The robot can
+face any heading (``--yaw``) to test the reference's alignment, and commands and state can be delayed. The physics,
+gain table, standing pose and effort limits come from a training run's env.yaml, as in sim2sim. ``--record`` saves the robot's
 motion at 50 Hz in the format ``./cyclotron.sh --render`` reads.
 """
 
@@ -36,7 +37,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "source" / "cyclotron"))
 
 from cyclotron.sim2real import FIRMWARE_JOINTS, JointMap, heading, load_joint_limits  # noqa: E402
-from cyclotron.sim2sim import TrackingRun, load_env_yaml, load_reference  # noqa: E402
+from cyclotron.sim2sim import PolicyRun, load_reference  # noqa: E402
 
 DEFAULT_MODEL_DIR = REPOSITORY_ROOT / "third_party" / "asimov-1" / "sim-model"
 DAMP, STAND, MOVE = 0, 1, 2
@@ -81,7 +82,7 @@ def min_jerk(t: float) -> float:
 class Robot:
     """Asimov 1 in MuJoCo with the firmware's mode machine."""
 
-    def __init__(self, args, run: TrackingRun):
+    def __init__(self, args, run: PolicyRun):
         import mujoco
 
         self.mujoco = mujoco
@@ -94,10 +95,8 @@ class Robot:
         self.joint_map = JointMap(run.joint_names)
         self.lower, self.upper = load_joint_limits(args.urdf, run.joint_names)
         self.stand_pose = run.default_joint_pos.copy()
-        cfg = load_env_yaml(Path(args.run_dir) / "params" / "env.yaml")
-        root_height = float(cfg["scene"]["robot"]["init_state"]["pos"][2])
 
-        self.data.qpos[0:3] = (0.0, 0.0, root_height)
+        self.data.qpos[0:3] = (0.0, 0.0, run.root_height)
         self.data.qpos[3:7] = Rotation.from_euler("z", args.yaw).as_quat()[[3, 0, 1, 2]]
         self.data.qpos[self.qpos] = self.stand_pose
         mujoco.mj_forward(self.model, self.data)
@@ -176,8 +175,8 @@ class Robot:
             self.trajectory = target
             self.paused = False
             if len(c.all_trajectory.kp) == len(FIRMWARE_JOINTS):
-                self.kp = np.asarray(c.all_trajectory.kp)[self.joint_map.motor_index]
-                self.kd = np.asarray(c.all_trajectory.kd)[self.joint_map.motor_index]
+                # Motor gains; the ankle motors' are seen at the ankle joints through the linkage.
+                self.kp, self.kd = self.joint_map.joint_gains(c.all_trajectory.kp, c.all_trajectory.kd)
             else:
                 self.kp, self.kd = self.run.stiffness.copy(), self.run.damping.copy()
             self.last_setpoint = self.time
@@ -271,7 +270,7 @@ def main() -> None:
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # status lines show up at once, also when redirected to a file
     pb = load()
-    run = TrackingRun.load(args.run_dir)
+    run = PolicyRun.load(args.run_dir)
     robot = Robot(args, run)
     version = serve_version(args.host, args.version_port)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

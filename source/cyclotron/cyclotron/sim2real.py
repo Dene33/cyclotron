@@ -2,13 +2,14 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
-"""Play a motion tracking policy on the real Asimov 1 (sim2real), through Menlo's Python SDK.
+"""Play a policy on the real Asimov 1 (sim2real), through Menlo's Python SDK.
 
 The robot's Asimov Edge reports and takes the 25 motors in the firmware's order, in the robot model's (URDF's) signs,
 except the ankles: each is a parallel linkage, reported as its two motors (A, B). menlo-sdk takes trajectory targets in
 the same frame it reports and sends the firmware each ankle's pitch and roll. The neck is locked in the 23-joint model
-the policies are trained on. This module converts between the two and steps the policy; it imports neither Isaac Lab
-nor menlo-sdk, so it can be tested anywhere. ``scripts/sim2real.py`` connects it to a robot.
+the policies are trained on. This module converts between the two and steps the policy, a motion tracking one
+(``TrackingController``) or one with the walking policy's interface (``VelocityController``); it imports neither Isaac
+Lab nor menlo-sdk, so it can be tested anywhere. ``scripts/sim2real.py`` connects it to a robot.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from cyclotron.sim2sim import TrackingRun, load_reference, tracking_observation
+from cyclotron.sim2sim import PolicyRun, load_reference, tracking_observation, velocity_observation
 
 # menlo-sdk's ``menlo.asimov.robots.ASIMOV_1_BIPED_JOINTS``: the firmware's motor table, in its order.
 FIRMWARE_JOINTS = (
@@ -90,6 +91,15 @@ ANKLE_K_ROLL = 0.8
 NECK_STIFFNESS = 40.0
 NECK_DAMPING = 2.0
 
+# The firmware drives each ankle motor with its own PD gains. Menlo's ankle model (cyclotron's ASIMOV_1_ACTUATORS since
+# the 2026-09-24 walking policy) gives the ankle joint the motors' gains times K^2 / 2: the 110 / 5 the firmware uses
+# are 224.42 / 10.201 at the pitch (K = 2.02) and 35.2 / 1.6 at the roll (K = 0.8). So a trajectory's ankle entries
+# carry motor gains: the joint's divided by K^2 / 2.
+ANKLE_GAIN_FACTORS = (ANKLE_K_PITCH**2 / 2, ANKLE_K_ROLL**2 / 2)
+# The gains Asimov Edge accepts in a trajectory.
+EDGE_KP_RANGE = (0.0, 500.0)
+EDGE_KD_RANGE = (0.0, 5.0)
+
 
 def ankle_from_motors(motor_a, motor_b):
     """Ankle (pitch, roll) from its motors (A, B). Linear, so it converts velocities too."""
@@ -137,14 +147,26 @@ class JointMap:
         return motors
 
     def gains(self, stiffness: Sequence[float], damping: Sequence[float]) -> tuple[list[float], list[float]]:
-        """Per-motor PD gains for a trajectory, from the policy's per-joint gains. An ankle's two entries get its pitch
-        and roll gains, as its joint targets there; how the firmware applies them across the linkage is not
-        documented."""
+        """Per-motor PD gains for a trajectory, from the policy's per-joint gains. An ankle's motor A gets its pitch
+        gains and motor B its roll gains, as motor gains (``ANKLE_GAIN_FACTORS``); they are equal for a policy
+        trained with Menlo's ankle model."""
         kp = np.full(len(FIRMWARE_JOINTS), np.nan)
         kd = np.full(len(FIRMWARE_JOINTS), np.nan)
         kp[self.motor_index], kd[self.motor_index] = stiffness, damping
+        for a, b, pitch, roll in self.ankles:
+            for motor, joint, factor in ((a, pitch, ANKLE_GAIN_FACTORS[0]), (b, roll, ANKLE_GAIN_FACTORS[1])):
+                kp[motor], kd[motor] = stiffness[joint] / factor, damping[joint] / factor
         kp[self.neck_index], kd[self.neck_index] = NECK_STIFFNESS, NECK_DAMPING
         return kp.tolist(), kd.tolist()
+
+    def joint_gains(self, kp: Sequence[float], kd: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """The policy's per-joint gains from a trajectory's per-motor gains: the inverse of :meth:`gains`."""
+        kp, kd = np.asarray(kp, dtype=np.float64), np.asarray(kd, dtype=np.float64)
+        stiffness, damping = kp[self.motor_index].copy(), kd[self.motor_index].copy()
+        for a, b, pitch, roll in self.ankles:
+            for motor, joint, factor in ((a, pitch, ANKLE_GAIN_FACTORS[0]), (b, roll, ANKLE_GAIN_FACTORS[1])):
+                stiffness[joint], damping[joint] = kp[motor] * factor, kd[motor] * factor
+        return stiffness, damping
 
 
 def load_joint_limits(urdf_path: str | Path, joint_names: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -195,7 +217,7 @@ class TrackingController:
 
     def __init__(
         self,
-        run: TrackingRun,
+        run: PolicyRun,
         policy: Callable[[np.ndarray], np.ndarray],
         joint_limits: tuple[np.ndarray, np.ndarray],
     ):
@@ -242,10 +264,49 @@ class TrackingController:
             self.action,
         )
         self.action = np.asarray(self.policy(observation), dtype=np.float32)
-        target = self.run.default_joint_pos + self.run.action_scale * self.action
+        target = self.run.joint_targets(self.action)
         clamped_target = np.clip(target, self.lower, self.upper)
         if settling:
             self.settle_steps -= 1
         else:
             self.frame += 1
+        return Step(observation, self.action, clamped_target, clamped_target != target)
+
+
+class VelocityController:
+    """Steps a policy with the walking policy's interface (``Asimov1-Velocity``, ``Asimov1-Jump``) on what the robot
+    measures and a velocity command, one policy step at a time. The observation is built as the run's env.yaml
+    records; the targets are the run's (scaled and clipped as in training), within the joint limits."""
+
+    def __init__(
+        self,
+        run: PolicyRun,
+        policy: Callable[[np.ndarray], np.ndarray],
+        joint_limits: tuple[np.ndarray, np.ndarray],
+    ):
+        if run.interface != "velocity":
+            raise ValueError(f"Expected a policy with the walking policy's interface, got a {run.interface} policy.")
+        self.run = run
+        self.policy = policy
+        self.lower, self.upper = joint_limits
+        self.dt = run.physics_dt * run.decimation
+        self.start()
+
+    def start(self) -> None:
+        self.action = np.zeros(len(self.run.joint_names), dtype=np.float32)
+
+    def step(
+        self,
+        gravity: np.ndarray,
+        ang_vel: np.ndarray,
+        joint_pos: np.ndarray,
+        joint_vel: np.ndarray,
+        command: np.ndarray,
+    ) -> Step:
+        """The next joint targets, from gravity's direction and the angular velocity (pelvis frame), the joint
+        positions and velocities (the policy's order) and the velocity command (forward, sideways, yaw rate)."""
+        observation = velocity_observation(self.run, ang_vel, gravity, command, joint_pos, joint_vel, self.action)
+        self.action = np.asarray(self.policy(observation), dtype=np.float32)
+        target = self.run.joint_targets(self.action)
+        clamped_target = np.clip(target, self.lower, self.upper)
         return Step(observation, self.action, clamped_target, clamped_target != target)
