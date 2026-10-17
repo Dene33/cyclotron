@@ -200,6 +200,6 @@ def test_jump_model_card_says_how_to_trigger_the_jump():
     )
     assert card.startswith("---\nlibrary_name: asimov\n")
     assert "A forward speed of 0.3 m/s (it was trained with 0.25 to 0.4), held for the whole jump" in card
-    assert "about 2.2 s" in card and "about 1.4 s after the command starts" in card
+    assert "about 2.2 s" in card and "lands 1.4 s after the\n  command starts; release the command after landing" in card
     assert "[Menlo/walk](https://huggingface.co/Menlo/walk)" in card and "Checkpoint `model_3999.pt`." in card
     assert "Reference motion: CMU 13_11." in card and "[me/cyclotron](https://github.com/me/cyclotron)" in card

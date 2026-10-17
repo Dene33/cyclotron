@@ -202,8 +202,8 @@ The velocity command is the trigger:
 
 - Zero: the robot stands and balances.
 - A forward speed of {speed:g} m/s (it was trained with {speed_low:g} to {speed_high:g}), held for the whole jump,
-  about {hold:.1f} s, then released: one forward jump. The robot lands about {landing:.1f} s after the command starts.
-  Held on after that, it jumps again.
+  about {hold:.1f} s, then released: one forward jump. The reference it learned from lands {landing:.1f} s after the
+  command starts; release the command after landing. Held on after that, it jumps again.
 
 It doesn't walk: hand over to the walking policy once it stands.
 
@@ -217,9 +217,10 @@ It doesn't walk: hand over to the walking policy once it stands.
 ## How it was trained
 
 `Asimov1-Jump-v0` in the training code, with PPO in Isaac Lab: the motion tracking rewards of `Asimov1-Tracking-v0`
-on `{motion}`, but the policy never sees the reference motion. It only shapes the rewards and what the critic sees, so
-the policy doesn't need it to run. The ankle targets are clamped in training as Asimov 1's firmware clamps them
-(0.35 rad pitch, 0.1 rad roll).
+on `{motion}`, plus the legs' left/right symmetry and lifting and landing together, the arms' and waist's joint angles,
+the heading and smoothness. The policy never sees the reference motion: it only shapes the rewards and what the critic
+sees, so the policy doesn't need it to run. The ankle targets are clamped in training as Asimov 1's firmware clamps
+them (0.35 rad pitch, 0.1 rad roll), and the joints' armature is randomised.
 {motion_source}
 ## Status
 

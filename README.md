@@ -357,8 +357,8 @@ checks: observations, joint order, action scales, offsets and clips, PD gains an
 `--share` publishes a jump with its own model card, without the reference motion, and only if its contract is the
 walking policy's (`--walking-repo`, default `Menlo/asimov1-locomotion-26-09-24`).
 
-The first completed run's [validation results](docs/jump-validation.md) cover the deployment contract, randomized
-Isaac evaluation, MuJoCo robustness and the SDK runner against a simulated robot.
+The published policy's [validation results](docs/jump-validation.md) cover the deployment contract, randomised Isaac
+evaluation, leg sync, MuJoCo robustness and the SDK runner against a simulated robot.
 
 ## Compare policies side by side
 
