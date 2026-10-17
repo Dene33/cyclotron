@@ -13,12 +13,21 @@ held after landing, it jumps again.
 The jump is learned from a reference motion with the motion tracking rewards (``Asimov1-Tracking``), but the policy
 never sees the reference: only the rewards and the critic do (see ``mdp.JumpCommand``). Asimov 1's firmware clamps
 the ankle targets it is sent (0.35 rad pitch, 0.1 rad roll), so the simulated ankles do too.
+
+On top of the tracking rewards: the arms and waist track the reference's joint angles (without a clock, the policy
+otherwise turns a wrist or the waist, which no tracked body notices, to time the jump), the legs keep the reference's
+left/right symmetry and lift and land together, the heading follows the reference's, and smoothness penalties keep
+the targets from jumping between steps. The joints' armature is randomised, since the landing depends on the ankle's,
+which is only known through a model.
 """
 
 import dataclasses
 
 from isaaclab.actuators import ActuatorBaseCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
 from cyclotron.assets.actuators import TargetLimitedDelayedPDActuatorCfg
@@ -32,6 +41,8 @@ from cyclotron.tasks.tracking.tracking_env_cfg import (
     PUSH_VELOCITY_RANGE,
     TRACKED_BODIES,
     Asimov1TrackingEnvCfg,
+    EventCfg,
+    RewardsCfg,
 )
 from cyclotron.tasks.tracking.tracking_env_cfg import ObservationsCfg as TrackingObservationsCfg
 
@@ -87,12 +98,58 @@ class ObservationsCfg:
     critic: CriticCfg = CriticCfg()
 
 
+# Joints whose angles the arms and waist reward tracks.
+ARM_AND_WAIST_JOINTS = ["waist_yaw_joint", ".*_shoulder_.*_joint", ".*_elbow_joint", ".*_wrist_yaw_joint"]
+
+
+@configclass
+class JumpRewardsCfg(RewardsCfg):
+    """The tracking rewards, plus the arms and waist, the legs' symmetry, the heading and smoothness."""
+
+    motion_arm_joint_pos = RewTerm(
+        func=mdp.motion_joint_position_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 0.5, "joint_names": ARM_AND_WAIST_JOINTS},
+    )
+    motion_leg_symmetry = RewTerm(
+        func=mdp.motion_leg_symmetry_error_exp, weight=1.0, params={"command_name": "motion", "std": 0.3}
+    )
+    feet_height_difference = RewTerm(
+        func=mdp.motion_feet_height_difference, weight=-10.0, params={"command_name": "motion", "tolerance": 0.02}
+    )
+    motion_anchor_heading = RewTerm(
+        func=mdp.motion_anchor_heading_error_exp, weight=0.5, params={"command_name": "motion", "std": 0.2}
+    )
+    joint_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
+
+    def __post_init__(self):
+        self.action_rate_l2.weight = -0.2
+
+
+@configclass
+class JumpEventCfg(EventCfg):
+    """The tracking task's randomisation, plus the joints' armature."""
+
+    joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "armature_distribution_params": (0.6, 1.4),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+
 @configclass
 class Asimov1JumpEnvCfg(Asimov1TrackingEnvCfg):
 
     observations: ObservationsCfg = ObservationsCfg()
     actions: VelocityActionsCfg = VelocityActionsCfg()
     commands: CommandsCfg = CommandsCfg()
+    rewards: JumpRewardsCfg = JumpRewardsCfg()
+    events: JumpEventCfg = JumpEventCfg()
 
     def __post_init__(self):
         super().__post_init__()
@@ -113,6 +170,7 @@ class Asimov1JumpEnvCfg_PLAY(Asimov1JumpEnvCfg):
         self.events.qpos0_rand = None
         self.events.base_com = None
         self.events.pd_gains_rand = None
+        self.events.joint_armature = None
         motion = self.commands.motion
         motion.pose_range = {}
         motion.velocity_range = {}

@@ -10,11 +10,12 @@ The Isaac Lab Project Developers, MIT License.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.utils.math import quat_error_magnitude
+from isaaclab.utils.math import quat_error_magnitude, yaw_quat
 
 from .commands import MotionCommand
 
@@ -115,3 +116,55 @@ def motion_global_body_angular_velocity_error_exp(
     ids = body_indexes(command, body_names)
     error = torch.sum(torch.square(command.body_ang_vel_w[:, ids] - command.robot_body_ang_vel_w[:, ids]), dim=-1)
     return torch.exp(-error.mean(-1) / std**2)
+
+
+# Asimov 1's leg joints mirror: the same motion of both legs has q_right = -q_left, so q_left + q_right is a pair's
+# asymmetry.
+LEG_JOINT_PAIRS = ["hip_pitch", "hip_roll", "hip_yaw", "knee", "ankle_pitch", "ankle_roll"]
+
+
+def joint_indexes(command: MotionCommand, joint_names: list[str]) -> list[int]:
+    """Indexes of the motion's joints that match any of the ``joint_names`` regexes."""
+    return [i for i, name in enumerate(command.motion.joint_names) if any(re.fullmatch(p, name) for p in joint_names)]
+
+
+def motion_joint_position_error_exp(
+    env: ManagerBasedRLEnv, command_name: str, std: float, joint_names: list[str]
+) -> torch.Tensor:
+    """Tracking of the reference's joint positions for ``joint_names``, e.g. the arms and waist, which the body pose
+    rewards barely see: a wrist turned on its own axis moves no tracked body."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    ids = joint_indexes(command, joint_names)
+    error = torch.sum(torch.square(command.joint_pos[:, ids] - command.robot_joint_pos[:, ids]), dim=-1)
+    return torch.exp(-error / std**2)
+
+
+def motion_leg_symmetry_error_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
+    """The legs' left/right asymmetry matching the reference's, pair by pair (``LEG_JOINT_PAIRS``), so the legs move
+    together as the reference's do. Rewarding symmetry rather than each leg's pose also holds when the robot runs
+    early or late: the body pose rewards then pay for moving one leg on the reference's time while the other lags."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    names = command.motion.joint_names
+    left = [names.index(f"left_{pair}_joint") for pair in LEG_JOINT_PAIRS]
+    right = [names.index(f"right_{pair}_joint") for pair in LEG_JOINT_PAIRS]
+    robot, reference = command.robot_joint_pos, command.joint_pos
+    error = torch.sum(torch.square((robot[:, left] + robot[:, right]) - (reference[:, left] + reference[:, right])), dim=-1)
+    return torch.exp(-error / std**2)
+
+
+def motion_feet_height_difference(env: ManagerBasedRLEnv, command_name: str, tolerance: float) -> torch.Tensor:
+    """How much the robot's feet differ in height beyond the reference's feet (plus ``tolerance``), in units of 10 cm:
+    a penalty for lifting or landing one foot before the other."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    feet = command.motion_foot_ids
+    robot_z = command.robot_body_pos_w[:, feet, 2]
+    reference_z = command.body_pos_relative_w[:, feet, 2]
+    difference = torch.abs((robot_z[:, 0] - robot_z[:, 1]) - (reference_z[:, 0] - reference_z[:, 1]))
+    return torch.clamp(difference - tolerance, min=0.0) / 0.1
+
+
+def motion_anchor_heading_error_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
+    """Tracking of the reference's heading (the anchor's yaw), so the robot jumps where the reference does."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    error = quat_error_magnitude(yaw_quat(command.anchor_quat_w), yaw_quat(command.robot_anchor_quat_w)) ** 2
+    return torch.exp(-error / std**2)
