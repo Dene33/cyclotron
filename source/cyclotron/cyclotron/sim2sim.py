@@ -11,7 +11,9 @@ the training run's ``env.yaml``. Two policy interfaces are supported:
 - ``velocity`` (``Asimov1-Velocity``, ``Asimov1-Jump``): the walking policy's interface, a velocity command and what
   the robot measures, in the term order, joint order and scales the run's ``env.yaml`` records.
 
-The robot clamps ankle targets as Asimov 1's firmware does (``ASIMOV_1_FIRMWARE_TARGET_LIMITS``).
+The robot clamps ankle targets as Asimov 1's firmware does (``ASIMOV_1_FIRMWARE_TARGET_LIMITS``), and its joints get
+the run's armature (the motors' inertia as the joint sees it), which the training actuators set: the published MJCF
+predates Menlo's ankle model, whose ankle pitch has 7.6 times the armature.
 """
 
 from __future__ import annotations
@@ -140,6 +142,8 @@ class PolicyRun:
     stiffness: np.ndarray
     damping: np.ndarray
     effort_limit: np.ndarray
+    armature: np.ndarray
+    """Per joint, NaN where the run's actuators don't set it."""
     actuator_groups: list[str]
     action_scale: np.ndarray
     action_clip: np.ndarray
@@ -160,7 +164,7 @@ class PolicyRun:
         joints = list(action["joint_names"])
         if not action["use_default_offset"]:
             raise ValueError("Expected joint position actions around the default pose.")
-        stiffness, damping, effort = (np.full(len(joints), np.nan) for _ in range(3))
+        stiffness, damping, effort, armature = (np.full(len(joints), np.nan) for _ in range(4))
         groups = [""] * len(joints)
         for group, actuator in cfg["scene"]["robot"]["actuators"].items():
             for i, joint in enumerate(joints):
@@ -170,6 +174,7 @@ class PolicyRun:
                         actuator["damping"],
                         actuator["effort_limit"],
                     )
+                    armature[i] = actuator.get("armature") if actuator.get("armature") is not None else np.nan
                     groups[i] = group
         if not all(groups):
             raise ValueError(f"No actuator for joints {[j for j, g in zip(joints, groups) if not g]}.")
@@ -194,6 +199,7 @@ class PolicyRun:
             stiffness=stiffness,
             damping=damping,
             effort_limit=effort,
+            armature=armature,
             actuator_groups=groups,
             action_scale=scale,
             action_clip=clip,
@@ -348,6 +354,7 @@ class _MujocoRobot:
         delay: int,
         foot_friction: float | None,
         firmware_clamp: bool,
+        run_armature: bool = True,
     ):
         import mujoco
 
@@ -365,6 +372,9 @@ class _MujocoRobot:
         self.peak = np.array([ASIMOV_1_PEAK_TORQUE[group] for group in run.actuator_groups])
         self.no_load = np.array([ASIMOV_1_MAX_SPEED[group] for group in run.actuator_groups]) * (motor_speed_ratio or 1.0)
         self.target_limit = run.firmware_target_limits() if firmware_clamp else np.full(len(run.joint_names), np.inf)
+        if run_armature:
+            known = ~np.isnan(run.armature)
+            self.model.dof_armature[self.qvel[known]] = run.armature[known]
         self.targets = [run.default_joint_pos.copy()] * (delay + 1)
         self.log = {"root_pos": [], "root_quat": [], "joint_pos": []}
 
@@ -412,6 +422,7 @@ def play(
     delay: int = 0,
     foot_friction: float | None = None,
     firmware_clamp: bool = True,
+    run_armature: bool = True,
 ) -> dict[str, np.ndarray]:
     """Play a tracking run's reference motion once in MuJoCo, starting on its first frame.
 
@@ -421,6 +432,7 @@ def play(
         delay: Physics steps between computing a joint target and the PD controller using it.
         foot_friction: Sliding friction of the feet. Their contact spheres take priority over the floor in the MJCF.
         firmware_clamp: Clamp the ankle targets as Asimov 1's firmware does.
+        run_armature: Give the joints the run's armature rather than the MJCF's.
 
     Returns:
         The rollout as recorded by ``play --record``, plus ``fell_at`` (seconds, or -1).
@@ -428,7 +440,7 @@ def play(
     reference = load_reference(run)
     reference_q, reference_dq = reference["joint_pos"], reference["joint_vel"]
     reference_pos, reference_quat = reference["pelvis_pos"], reference["pelvis_quat"]
-    robot = _MujocoRobot(run, xml_path, motor_speed_ratio, delay, foot_friction, firmware_clamp)
+    robot = _MujocoRobot(run, xml_path, motor_speed_ratio, delay, foot_friction, firmware_clamp, run_armature)
     data, qpos, qvel = robot.data, robot.qpos, robot.qvel
     robot.place(reference_pos[0], reference_quat[0], reference_q[0])
 
@@ -464,6 +476,7 @@ def play_velocity(
     delay: int = 0,
     foot_friction: float | None = None,
     firmware_clamp: bool = True,
+    run_armature: bool = True,
 ) -> dict[str, np.ndarray]:
     """Play a velocity-interface policy in MuJoCo, from standing in the default pose, through ``schedule``: velocity
     commands (forward, sideways, yaw rate) and how long each is held (s).
@@ -473,7 +486,7 @@ def play_velocity(
         when the pelvis tilted past the firmware's fall trip or dropped below ``MIN_PELVIS_HEIGHT``.
     """
     commands = schedule_commands(schedule, run.policy_dt)
-    robot = _MujocoRobot(run, xml_path, motor_speed_ratio, delay, foot_friction, firmware_clamp)
+    robot = _MujocoRobot(run, xml_path, motor_speed_ratio, delay, foot_friction, firmware_clamp, run_armature)
     data, qpos, qvel = robot.data, robot.qpos, robot.qvel
     robot.place(np.array([0.0, 0.0, run.root_height]), np.array([1.0, 0.0, 0.0, 0.0]), run.default_joint_pos)
 

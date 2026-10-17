@@ -402,8 +402,9 @@ the maximum speeds, so `1` is the weakest motor. `--save results.npz` also write
 positions, speeds and torques of the first 16 robots (`--save_robots`) at every physics step.
 
 **MuJoCo (sim2sim).** `--sim2sim` plays the exported policy on Asimov 1's published MJCF, with the gains, effort
-limits, action processing, timing and observations from the run's `env.yaml`, and the ankle targets clamped as the
-firmware does (`--no_firmware_clamp` turns that off). It needs MuJoCo and ONNX Runtime
+limits, joint armature, action processing, timing and observations from the run's `env.yaml`, and the ankle targets
+clamped as the firmware does (`--no_firmware_clamp` turns that off). The published MJCF predates Menlo's ankle model,
+whose ankle pitch has 7.6 times the armature; `--mjcf_armature` keeps the MJCF's. It needs MuJoCo and ONNX Runtime
 (`uv pip install -e "source/cyclotron[sim2sim]"`).
 
 ```bash

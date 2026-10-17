@@ -41,6 +41,7 @@ scene:
         stiffness: 150.0
         damping: 5.0
         effort_limit: 45.0
+        armature: 0.43
 actions:
   joint_pos:
     joint_names:
@@ -77,6 +78,7 @@ def test_tracking_run_reads_env_yaml(tmp_path):
     assert (run.physics_dt, run.decimation, run.root_height) == (0.005, 4, 0.639)
     assert run.motion_file == "/data/jump.npz"
     assert run.interface == "tracking" and run.observations == []
+    np.testing.assert_allclose(run.armature, [0.43, 0.43])
     np.testing.assert_allclose(run.joint_targets(np.array([1.0, -1.0])), [0.1, 0.2])
 
 

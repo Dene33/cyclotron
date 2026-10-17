@@ -1,8 +1,9 @@
 """Play a policy in MuJoCo, on Asimov 1's published MJCF (sim2sim).
 
 The policy is the ONNX export of a training run, and the PD gains, effort limits, action processing, timing and
-observations come from the run's env.yaml (``params/env.yaml``, or ``env.yaml`` in a shared policy's folder). The
-ankle targets are clamped as Asimov 1's firmware does, unless ``--no_firmware_clamp``.
+observations come from the run's env.yaml (``params/env.yaml``, or ``env.yaml`` in a shared policy's folder), and so
+does the joints' armature, unless ``--mjcf_armature``. The ankle targets are clamped as Asimov 1's firmware does,
+unless ``--no_firmware_clamp``.
 
 - A motion tracking run plays the reference motion it was trained on, from its first frame, and reports whether the
   robot falls (training's pelvis height and tilt limits).
@@ -59,6 +60,11 @@ parser.add_argument("--foot_friction", type=float, default=None, help="Sliding f
 parser.add_argument(
     "--no_firmware_clamp", action="store_true", help="Don't clamp the ankle targets as the firmware does."
 )
+parser.add_argument(
+    "--mjcf_armature",
+    action="store_true",
+    help="Keep the MJCF's joint armature instead of the run's (the published MJCF predates Menlo's ankle model).",
+)
 
 
 def default_onnx(run_dir: Path) -> Path:
@@ -100,6 +106,7 @@ def main() -> None:
         delay=args.delay,
         foot_friction=args.foot_friction,
         firmware_clamp=not args.no_firmware_clamp,
+        run_armature=not args.mjcf_armature,
     )
     if run.interface == "tracking":
         rollout = play(run, policy, args.xml, **options)

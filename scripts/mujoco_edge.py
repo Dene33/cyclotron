@@ -92,6 +92,8 @@ class Robot:
         self.data = mujoco.MjData(self.model)
         self.qpos = np.array([self.model.jnt_qposadr[self.model.joint(n).id] for n in run.joint_names])
         self.qvel = np.array([self.model.jnt_dofadr[self.model.joint(n).id] for n in run.joint_names])
+        known = ~np.isnan(run.armature)  # the run's motor inertia, as in sim2sim
+        self.model.dof_armature[self.qvel[known]] = run.armature[known]
         self.joint_map = JointMap(run.joint_names)
         self.lower, self.upper = load_joint_limits(args.urdf, run.joint_names)
         self.stand_pose = run.default_joint_pos.copy()

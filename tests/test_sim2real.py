@@ -152,6 +152,7 @@ def run(tmp_path) -> PolicyRun:
         stiffness=np.full(n, 100.0),
         damping=np.full(n, 5.0),
         effort_limit=np.full(n, 40.0),
+        armature=np.full(n, np.nan),
         actuator_groups=["joint"] * n,
         action_scale=np.full(n, 0.25),
         action_clip=np.tile([-np.inf, np.inf], (n, 1)),
