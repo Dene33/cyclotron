@@ -61,3 +61,34 @@ class Asimov1StandIdealEnvCfg_PLAY(Asimov1StandIdealEnvCfg):
         self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)
         self.events.reset_base.params["pose_range"] = {k: (0.0, 0.0) for k in self.events.reset_base.params["pose_range"]}
         self.events.reset_base.params["velocity_range"] = {k: (0.0, 0.0) for k in self.events.reset_base.params["velocity_range"]}
+
+
+# Ablations for the RL crash course, Module 1, lesson 6: the same task with one
+# piece left out, trained with the same seed and iterations as the reference.
+
+
+@configclass
+class Asimov1StandIdealNoPoseEnvCfg(Asimov1StandIdealEnvCfg):
+    """Without the pose reward: nothing says what a good stance looks like."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.pose = None
+
+
+@configclass
+class Asimov1StandIdealNoActionRateEnvCfg(Asimov1StandIdealEnvCfg):
+    """Without the action-rate penalty: nothing charges for jittery targets."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.action_rate_l2 = None
+
+
+@configclass
+class Asimov1StandIdealNoFallEndEnvCfg(Asimov1StandIdealEnvCfg):
+    """Without episodes ending on a fall: a fallen robot lies there until the 20 s timeout."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.terminations.fell_over = None
